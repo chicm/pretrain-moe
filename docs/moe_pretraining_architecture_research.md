@@ -271,7 +271,7 @@ Kimi K3 License 允许广泛使用、修改和分发，但带有显著的商业�
 Kimi Delta Attention 将传统无限范围的 log-decay 改为有界衰减。报告中的完整实现包含 low-rank decay projection 和受约束参数化；下面只保留用于说明有界衰减思想的简化记号，而不是可直接实现的完整公式：
 
 $$
-g = g_{\min}\cdot\operatorname{Sigmoid}(\exp(A_h)z)
+g = g_{\min}\cdot\mathrm{Sigmoid}(\exp(A_h)z)
 $$
 
 其中：

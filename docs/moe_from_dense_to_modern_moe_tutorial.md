@@ -95,8 +95,8 @@
 一个 Dense Transformer block 中，忽略 norm 和 residual 后，SwiGLU FFN 可以写成：
 
 $$
-\operatorname{FFN}(x)
-=W_{down}\left(\operatorname{SiLU}(W_{gate}x)\odot W_{up}x\right)
+\mathrm{FFN}(x)
+=W_{down}\left(\mathrm{SiLU}(W_{gate}x)\odot W_{up}x\right)
 $$
 
 若 `x ∈ R^d`、intermediate size 为 `f`，三个核心矩阵为：
@@ -129,11 +129,11 @@ z=W_rx
 $$
 
 $$
-p=\operatorname{Softmax}(z)
+p=\mathrm{Softmax}(z)
 $$
 
 $$
-\mathcal T(x)=\operatorname{TopK}(p,k)
+\mathcal T(x)=\mathrm{TopK}(p,k)
 $$
 
 $$
@@ -152,15 +152,15 @@ $$
 放回完整 pre-norm block 后，模块边界是：
 
 $$
-u_l=h_l+\operatorname{Attention}(\operatorname{Norm}_{attn}(h_l))
+u_l=h_l+\mathrm{Attention}(\mathrm{Norm}_{attn}(h_l))
 $$
 
 $$
-x_l=\operatorname{Norm}_{ffn}(u_l)
+x_l=\mathrm{Norm}_{ffn}(u_l)
 $$
 
 $$
-h_{l+1}=u_l+\operatorname{MoE}(x_l)
+h_{l+1}=u_l+\mathrm{MoE}(x_l)
 $$
 
 前面的简化公式中，`x=x_l`、`y=MoE(x_l)`。MoE 替换的是第二条 residual branch 里的 FFN，不会跳过 attention residual。
@@ -1336,7 +1336,7 @@ $$
 然后对每个 token 取 Top-k：
 
 $$
-\mathcal T_t=\operatorname{TopK}_i(p_{t,i},k)
+\mathcal T_t=\mathrm{TopK}_i(p_{t,i},k)
 $$
 
 选中后常做重新归一化：
@@ -1382,7 +1382,7 @@ $$
 普通训练中相邻 steps 的 batch 不同，不能把两批不同 token 的 expert IDs 直接比较成“flip”。对固定 probe 中同一 layer、同一 token position，若两次 Top-k 集合分别为 `S_a,S_b`，可定义：
 
 $$
-\operatorname{flip}=1-\frac{|S_a\cap S_b|}{k}
+\mathrm{flip}=1-\frac{|S_a\cap S_b|}{k}
 $$
 
 还应同时看 score margin；大 flip 可能来自参数快速变化，也可能只是大量 token 长期位于几乎并列的决策边界。
@@ -1451,7 +1451,7 @@ DeepSeek V4 在前若干层使用 token-ID hash routing，之后再使用 score 
 DeepSeek V4 的 score routing 不直接用普通 softmax score，而使用正值变换：
 
 $$
-s_i=\sqrt{\operatorname{softplus}(z_i)}
+s_i=\sqrt{\mathrm{softplus}(z_i)}
 $$
 
 直觉上：
@@ -1604,12 +1604,12 @@ $$
 常用负载指标：
 
 $$
-\operatorname{CV}(n)
-=\frac{\operatorname{Std}(n_i)}{\operatorname{Mean}(n_i)}
+\mathrm{CV}(n)
+=\frac{\mathrm{Std}(n_i)}{\mathrm{Mean}(n_i)}
 $$
 
 $$
-R_{max}=\frac{\max_i n_i}{\operatorname{Mean}(n_i)}
+R_{max}=\frac{\max_i n_i}{\mathrm{Mean}(n_i)}
 $$
 
 router entropy：
@@ -1669,7 +1669,7 @@ Auxiliary-loss-free routing 的核心思想是把“选择均衡”从主模型�
 设原始 affinity 为 `s_{t,i}`，每个 expert 有一个不参与反向传播的 correction bias `b_i`：
 
 $$
-\mathcal T_t=\operatorname{TopK}_i(s_{t,i}+b_i,k)
+\mathcal T_t=\mathrm{TopK}_i(s_{t,i}+b_i,k)
 $$
 
 但 combine weight 仍由**未加 bias 的原始 affinity**计算。训练过程中：
@@ -2000,7 +2000,7 @@ MoE 每层的 token dispatch 是 all-to-all；optimizer step 的 replica gradien
 一个最小 EP=2 例子：令 rank 0 拥有 `E0,E1`，rank 1 拥有 `E2,E3`。若源 rank 0 的四条 assignments 有两条去各目的地，源 rank 1 的四条中一条去 rank 0、三条去 rank 1，则 dispatch count matrix（行是 source，列是 destination）为：
 
 $$
-\operatorname{send\_counts}=
+\mathrm{send\_counts}=
 \begin{bmatrix}2&2\\1&3\end{bmatrix}
 $$
 
@@ -2424,7 +2424,7 @@ QK-Norm 不是 MoE 技术，但 attention 爆炸会改变进入 router 的 resid
 SwiGLU 的两个乘法分支都可能产生大值：
 
 $$
-\operatorname{SiLU}(W_gx)\odot W_ux
+\mathrm{SiLU}(W_gx)\odot W_ux
 $$
 
 DeepSeek V4 使用低成本限制：
@@ -2446,7 +2446,7 @@ DeepSeek V4 使用低成本限制：
 [Kimi K3 官方技术报告](https://raw.githubusercontent.com/MoonshotAI/Kimi-K3/main/k3_tech_report.pdf)使用更平滑的 bounded GLU。定义 soft cap：
 
 $$
-\operatorname{softcap}(x,\beta)=\beta\tanh(x/\beta)
+\mathrm{softcap}(x,\beta)=\beta\tanh(x/\beta)
 $$
 
 SiTU-GLU 可写成：
@@ -2454,7 +2454,7 @@ SiTU-GLU 可写成：
 $$
 \left[
 \beta_1\tanh\left(\frac{W_gx}{\beta_1}\right)
-\odot\operatorname{Sigmoid}(W_gx)
+\odot\mathrm{Sigmoid}(W_gx)
 \right]
 \odot
 \left[
@@ -2736,7 +2736,7 @@ $$
 概念公式：
 
 $$
-h_l=\operatorname{RMSNorm}(W_dh)
+h_l=\mathrm{RMSNorm}(W_dh)
 $$
 
 $$
@@ -2812,13 +2812,13 @@ $$
 Kimi K3 的 router 先得到正 affinity，例如：
 
 $$
-s_i=\operatorname{Sigmoid}(W_r x_i)
+s_i=\mathrm{Sigmoid}(W_r x_i)
 $$
 
 选择使用带 bias 的 score：
 
 $$
-\mathcal T_i=\operatorname{TopK}(s_i+b,k)
+\mathcal T_i=\mathrm{TopK}(s_i+b,k)
 $$
 
 但 mixture weight 使用原始 score：
@@ -2844,7 +2844,7 @@ $$
 
 $$
 \hat b_j^{(u+1)}
-=-\operatorname{Quantile}_{1-k/N}
+=-\mathrm{Quantile}_{1-k/N}
 \left(\{s_{i,j}-\alpha_i^{(u)}\}_{i=1}^{T}\right)
 $$
 
@@ -2978,7 +2978,7 @@ KDA 也是 delta-rule/linear-attention 家族，但 Kimi K3 对 decay 做了有�
 调研报告只使用一个说明“有界 log-decay”思想的简化式：
 
 $$
-g=g_{min}\cdot\operatorname{Sigmoid}(\exp(A_h)z)
+g=g_{min}\cdot\mathrm{Sigmoid}(\exp(A_h)z)
 $$
 
 其中 [Kimi K3 官方技术报告](https://raw.githubusercontent.com/MoonshotAI/Kimi-K3/main/k3_tech_report.pdf)给出 `g_min=-5`、`A_h` 初始为 0。真实 KDA 还包含 low-rank decay projection、tile 变换、chunk 算法和定制 backward；不能靠这个简式复刻。
@@ -3015,7 +3015,7 @@ Gated MLA 还在 attention output 上加入 elementwise gate。要获得 cache �
 Qwen3.5 风格的 gated full attention 从 projection 中同时产生 query-related gate：
 
 $$
-y=\operatorname{Gate}(x)\odot\operatorname{Attention}(x)
+y=\mathrm{Gate}(x)\odot\mathrm{Attention}(x)
 $$
 
 它让模型按通道调节 attention 输出强度，但：
