@@ -165,7 +165,562 @@ $$
 
 前面的简化公式中，`x=x_l`、`y=MoE(x_l)`。MoE 替换的是第二条 residual branch 里的 FFN，不会跳过 attention residual。
 
-### 1.3 “Mixture”不是把全部专家都算一遍
+### 1.3 从代码实现看：一个 Dense FFN 怎样变成 Sparse MoE
+
+前面的公式说明了数学语义；这一节把同一件事翻译成代码。先强调范围：下面的 `ReferenceSparseMoE` 是为了把数据流讲清楚的**单卡参考实现**，可以用于单元测试和小规模正确性验证，但不能直接当作大模型生产内核。它没有 fused dispatch、grouped GEMM、Expert Parallel、容量管理和高性能反向传播。
+
+#### 1.3.1 Dense 版本：一个模块、一条固定路径
+
+最小的 PyTorch SwiGLU 可以写成：
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class SwiGLU(nn.Module):
+    def __init__(self, d_model: int, d_ff: int):
+        super().__init__()
+        self.gate_proj = nn.Linear(d_model, d_ff, bias=False)
+        self.up_proj = nn.Linear(d_model, d_ff, bias=False)
+        self.down_proj = nn.Linear(d_ff, d_model, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate = F.silu(self.gate_proj(x))
+        value = self.up_proj(x)
+        return self.down_proj(gate * value)
+```
+
+`nn.Linear` 对最后一维做投影并保留所有前导维，因此 `x` 可以是 `[B,S,d]`，输出仍是 `[B,S,d]`。下面把这个 FFN 放回一个完整的 decoder-only Transformer，明确 `DenseBlock` 在模型中的位置。
+
+##### `DenseBlock` 在完整 decoder-only Transformer 里的位置
+
+下面是一份可运行的教学骨架。为了突出模块边界，它使用普通多头 causal self-attention 和 learned position embedding；生产模型中的 RoPE、GQA、QK-Norm、KV cache、padding/packing mask、dropout、activation checkpointing 和张量并行暂时省略，但这些简化不改变 Dense FFN 所在的位置。
+
+```python
+class CausalSelfAttention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int):
+        super().__init__()
+        if d_model % num_heads != 0:
+            raise ValueError("d_model must be divisible by num_heads")
+
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B,S,d]
+        batch_size, seq_len, d_model = x.shape
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+
+        # [B,S,d] -> [B,H,S,D_h]
+        def split_heads(t: torch.Tensor) -> torch.Tensor:
+            return t.reshape(
+                batch_size,
+                seq_len,
+                self.num_heads,
+                self.head_dim,
+            ).transpose(1, 2)
+
+        q = split_heads(q)
+        k = split_heads(k)
+        v = split_heads(v)
+
+        # PyTorch SDPA 在 is_causal=True 时应用下三角 causal mask。
+        attn_out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=True,
+        )
+
+        # [B,H,S,D_h] -> [B,S,d]
+        attn_out = attn_out.transpose(1, 2).contiguous().reshape(
+            batch_size,
+            seq_len,
+            d_model,
+        )
+        return self.out_proj(attn_out)
+
+
+class DenseBlock(nn.Module):
+    """一个完整的 pre-norm Transformer block。"""
+
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int,
+        num_heads: int,
+    ):
+        super().__init__()
+
+        # 第一条 residual branch：attention。
+        self.attn_norm = nn.RMSNorm(d_model)
+        self.attn = CausalSelfAttention(d_model, num_heads)
+
+        # 第二条 residual branch：Dense FFN。
+        # Dense -> MoE 时，核心替换点正是 self.ffn。
+        self.ffn_norm = nn.RMSNorm(d_model)
+        self.ffn = SwiGLU(d_model, d_ff)
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        h = h + self.attn(self.attn_norm(h))
+        h = h + self.ffn(self.ffn_norm(h))
+        return h
+
+
+class DenseDecoderLM(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int,
+        d_ff: int,
+        num_layers: int,
+        num_heads: int,
+        max_seq_len: int,
+        tie_embeddings: bool = True,
+    ):
+        super().__init__()
+        self.max_seq_len = max_seq_len
+
+        # 1. token id -> residual-stream hidden states。
+        self.embed_tokens = nn.Embedding(vocab_size, d_model)
+
+        # 教学代码使用 learned position embedding；生产模型可换成 RoPE。
+        self.embed_positions = nn.Embedding(max_seq_len, d_model)
+
+        # 2. DenseBlock 在这里按深度重复 num_layers 次。
+        self.layers = nn.ModuleList(
+            [
+                DenseBlock(
+                    d_model=d_model,
+                    d_ff=d_ff,
+                    num_heads=num_heads,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+
+        # 3. 所有 block 之后才是 final norm 和词表投影。
+        self.final_norm = nn.RMSNorm(d_model)
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+
+        if tie_embeddings:
+            self.lm_head.weight = self.embed_tokens.weight
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        # input_ids: [B,S]
+        _, seq_len = input_ids.shape
+        if seq_len > self.max_seq_len:
+            raise ValueError("sequence length exceeds max_seq_len")
+
+        positions = torch.arange(seq_len, device=input_ids.device)
+        h = self.embed_tokens(input_ids)
+        h = h + self.embed_positions(positions).unsqueeze(0)
+
+        # 整个模型的主要深度循环。
+        for block in self.layers:
+            h = block(h)
+
+        h = self.final_norm(h)
+        logits = self.lm_head(h)  # [B,S,V]
+        return logits
+```
+
+用一个很小的配置即可检查端到端 shape：
+
+```python
+model = DenseDecoderLM(
+    vocab_size=32_000,
+    d_model=256,
+    d_ff=704,
+    num_layers=4,
+    num_heads=8,
+    max_seq_len=2_048,
+)
+
+input_ids = torch.randint(0, 32_000, (2, 128))
+logits = model(input_ids)
+assert logits.shape == (2, 128, 32_000)
+
+# next-token prediction：位置 t 的 logits 预测位置 t+1 的 token。
+loss = F.cross_entropy(
+    logits[:, :-1].reshape(-1, logits.shape[-1]),
+    input_ids[:, 1:].reshape(-1),
+)
+```
+
+模块树可以画成：
+
+```text
+DenseDecoderLM
+├── embed_tokens
+├── embed_positions                 # 教学简化；RoPE 模型通常不在这里相加
+├── layers: ModuleList
+│   ├── layers[0]: DenseBlock
+│   │   ├── attn_norm
+│   │   ├── attn
+│   │   ├── ffn_norm
+│   │   └── ffn: SwiGLU             <- Dense -> MoE 的替换点
+│   ├── layers[1]: DenseBlock
+│   └── ...
+├── final_norm
+└── lm_head
+```
+
+实际代码库不一定真的使用 `DenseBlock` 这个类名。Hugging Face 风格常见 `model.layers[i].mlp`，其他仓库也可能写成 `transformer.h[i].ffn`、`decoder.layers[i].feed_forward` 或在统一的 `DecoderLayer` 中按 `layer_id` 选择 Dense/MoE。定位方法不是搜索类名，而是找到 embedding 之后的层循环，再找每层第二条 residual branch 中那个 `[B,S,d] -> [B,S,d]` 的 FFN 子模块。
+
+因此 `DenseBlock` 位于 embedding 与 final norm 之间的主干 `layers` 中；每个 block 自己包含 attention branch 和 FFN branch。完整前向路径是：
+
+```text
+input_ids [B,S]
+  -> token/position embedding [B,S,d]
+  -> DenseBlock 0
+       -> RMSNorm -> causal self-attention -> residual add
+       -> RMSNorm -> Dense SwiGLU          -> residual add
+  -> DenseBlock 1
+  -> ...
+  -> DenseBlock L-1
+  -> final RMSNorm
+  -> LM head
+  -> logits [B,S,V]
+```
+
+这里不存在路由元数据。每个 `DenseBlock.ffn` 只有一组 `gate/up/down` 权重；每个 token 都经过它们，反向传播时这组权重汇总所有 token 的梯度。典型参数路径为：
+
+```text
+layers.0.attn.qkv.weight
+layers.0.attn.out_proj.weight
+layers.0.ffn.gate_proj.weight
+layers.0.ffn.up_proj.weight
+layers.0.ffn.down_proj.weight
+```
+
+“前两层保持 dense、后 46 层改成 MoE”的准确含义也由此变得清楚：`layers[0]` 和 `layers[1]` 仍是 `attention + Dense SwiGLU`；`layers[2]...layers[47]` 仍然有 attention，只是第二条 residual branch 中的 `self.ffn` 换成 Sparse MoE。所谓 dense layer/MoE layer，通常是在描述该 Transformer block 的 **FFN 类型**，不是说 MoE layer 没有 attention。
+
+#### 1.3.2 类定义发生的核心变化
+
+从模块树看，Dense→MoE 的最小改动不是重写整个 Transformer block，而是替换第二条 residual branch 中的子模块：
+
+```python
+# Dense
+self.ffn = SwiGLU(d_model=d, d_ff=f)
+
+# MoE
+self.ffn = ReferenceSparseMoE(
+    d_model=d,
+    expert_ffn_dim=f_e,
+    num_experts=N,
+    top_k=k,
+    shared_ffn_dim=f_s,   # 没有 shared expert 时传 None
+)
+```
+
+替换后仍然要求：
+
+```text
+输入  [B, S, d]
+输出  [B, S, d]
+```
+
+所以 attention、residual stream 和后续层不需要知道内部用了多少个专家。真正新增的是 `router + experts + dispatch/combine`；每个 expert 内部仍然是刚才那个 `SwiGLU(d,f_e)`。
+
+要特别避免一个误解：**expert 不是把 hidden 维 `d` 切成 N 片。** 每个 routed expert 都接收完整的 `d` 维 token，并独立完成 `d → f_e → d` 映射。被稀疏选择的是“参数分支”，不是 residual stream 的某个切片。
+
+#### 1.3.3 一个语义正确的单卡参考实现
+
+```python
+class ReferenceSparseMoE(nn.Module):
+    """用于理解和单元测试；不是生产级 MoE kernel。"""
+
+    def __init__(
+        self,
+        d_model: int,
+        expert_ffn_dim: int,
+        num_experts: int,
+        top_k: int,
+        shared_ffn_dim: int | None = None,
+    ):
+        super().__init__()
+        if not 1 <= top_k <= num_experts:
+            raise ValueError("top_k must be in [1, num_experts]")
+
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.router = nn.Linear(d_model, num_experts, bias=False)
+        self.experts = nn.ModuleList(
+            [SwiGLU(d_model, expert_ffn_dim) for _ in range(num_experts)]
+        )
+        self.shared_expert = (
+            SwiGLU(d_model, shared_ffn_dim)
+            if shared_ffn_dim is not None
+            else None
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # [B,S,d] -> [T,d]，其中 T=B*S。
+        flat = x.reshape(-1, x.shape[-1])
+
+        # Router 通常用 FP32 计算 logits，避免低精度放大排序抖动。
+        # [T,d] @ [d,N] -> [T,N]
+        router_logits = F.linear(
+            flat.float(),
+            self.router.weight.float(),
+        )
+
+        # 每个 token 只保留 k 个 expert id；在选中集合内归一化 gate。
+        # topk_ids/topk_weight: [T,k]
+        topk_logits, topk_ids = torch.topk(
+            router_logits,
+            k=self.top_k,
+            dim=-1,
+        )
+        topk_weight = F.softmax(topk_logits, dim=-1).to(flat.dtype)
+
+        # combine 的目标缓冲区。一个 token 会被 k 个 expert 写回，故用加法。
+        out = torch.zeros_like(flat)
+
+        # 教学实现按 expert 循环，而不是按 token 循环。
+        for expert_id, expert in enumerate(self.experts):
+            # token_idx 表示哪些 token 选中了当前 expert；
+            # slot_idx 表示它位于该 token 的 Top-k 第几个槽位。
+            token_idx, slot_idx = torch.where(topk_ids == expert_id)
+            if token_idx.numel() == 0:
+                continue
+
+            expert_in = flat[token_idx]                 # [T_e,d]
+            expert_out = expert(expert_in)              # [T_e,d]
+            gate = topk_weight[token_idx, slot_idx]     # [T_e]
+            weighted = expert_out * gate.unsqueeze(-1)
+
+            # 同一 token 的 k 份 expert 输出在这里求和。
+            out = out.index_add(0, token_idx, weighted)
+
+        # shared expert 不参与 Top-k，所有 token 都执行一次。
+        if self.shared_expert is not None:
+            out = out + self.shared_expert(flat)
+
+        return out.reshape_as(x)
+```
+
+这里采用的是“先 Top-k，再在选中 logits 上做 softmax”的 combine 语义。它等价于“先对全部 `N` 个 logits 做 softmax、选出 Top-k、再把选中概率重归一化”，但**不等价于**保留未重归一化的全局 softmax 概率，也不等价于 sigmoid routing。移植具体模型时，必须按该模型的定义冻结这一步，不能只看 `topk_ids` 相同就认为实现等价。
+
+代码里的 `.float()` 只是直观表达“router 计算使用 FP32”。生产实现通常会让 router 权重/算子留在 FP32，或通过 autocast/fused kernel 控制累加精度；不应在每个 step 无条件临时物化一份大型参数副本。
+
+这段代码已经具备 Sparse MoE 的完整函数语义：
+
+- `ModuleList` 注册了 `N` 套互不共享的 expert 参数；
+- router 为每个 token 产生 `N` 个分数；
+- `topk_ids` 决定离散分支；
+- 同一个 token 因为 Top-k 会出现 `k` 次；
+- 每个 expert 只处理分给自己的 token 子集；
+- `index_add` 把多条分支还原成每个 token 一条输出；
+- shared expert 是额外的 dense 分支，不会替代 routed combine。
+
+对应的 `state_dict` 也从一套权重：
+
+```text
+ffn.gate_proj.weight
+ffn.up_proj.weight
+ffn.down_proj.weight
+```
+
+变成：
+
+```text
+ffn.router.weight
+ffn.experts.0.gate_proj.weight
+ffn.experts.0.up_proj.weight
+ffn.experts.0.down_proj.weight
+...
+ffn.experts.N-1.down_proj.weight
+ffn.shared_expert.*              # 若启用
+```
+
+这就是 checkpoint 为什么必须知道 expert 编号、所有者和并行组：专家不只是临时计算分支，而是持久化的独立参数集合。
+
+#### 1.3.4 `forward` 中的数据形状怎样变化
+
+把代码压缩为一张 shape 表：
+
+| 阶段 | 主要张量 | 形状 | 含义 |
+|---|---|---:|---|
+| 输入展平 | `flat` | `[T,d]` | `T=B×S` 个 token |
+| Router | `router_logits` | `[T,N]` | 每个 token 对每个 expert 的分数 |
+| Top-k | `topk_ids`, `topk_weight` | `[T,k]` | 每个 token 的 k 条选中路径 |
+| Assignment 展开 | token/expert/gate 三元组 | `[T×k]` | 一个 token 被复制成 k 条逻辑任务 |
+| Dispatch | `expert_in[e]` | `[T_e,d]` | 发给 expert e 的不规则 token 子批次 |
+| Expert FFN | `expert_out[e]` | `[T_e,d]` | 各 expert 独立计算 |
+| Combine | `out` | `[T,d]` | 按原 token id 加权求和 |
+| 恢复形状 | 输出 | `[B,S,d]` | 回到 residual branch |
+
+在本节这个不丢 token、也不受 capacity 截断的参考实现中：
+
+$$
+\sum_{e=1}^{N}T_e=T\times k
+$$
+
+因此 routed expert 的矩阵乘法工作量与 `T×k` 成正比，而不是与 `T×N` 成正比。总参数却仍保存了 `N` 套权重，这正是条件计算的代码本质。
+
+#### 1.3.5 一个“看起来像 MoE、实际上仍是 Dense 计算”的错误写法
+
+最容易写出的错误版本是先算所有专家，再从结果中 gather：
+
+```python
+# 错误示范：语义上可以选 Top-k，但计算上已经把 N 个专家全算完了。
+all_expert_out = torch.stack(
+    [expert(flat) for expert in self.experts],
+    dim=1,
+)  # [T,N,d]
+
+selected = gather_topk(all_expert_out, topk_ids)
+out = (selected * topk_weight[..., None]).sum(dim=1)
+```
+
+它的问题不是输出公式错，而是：
+
+- 已经执行了 `T×N` 个 token-expert 计算，而不是 `T×k` 个；
+- 中间张量达到 `[T,N,d]`，显存随 `N` 线性增长；
+- `N=96,k=6` 时，routed branch 理论上的 1/16 稀疏计算优势基本被抹掉。
+
+所以 Sparse MoE 的关键不是“有 Top-k 结果”，而是**必须在 expert GEMM 之前完成 dispatch**。
+
+#### 1.3.6 为什么参考实现仍然不够快
+
+参考实现虽然没有计算未选中的 token-expert 对，但仍有三个性能问题：
+
+1. Python 按 expert 循环，最多产生 `N` 组小 kernel launch；
+2. 每个 expert 收到的 `T_e` 不同，形成 ragged GEMM；
+3. `torch.where`、高级索引和多次 `index_add` 会产生额外扫描与临时张量。
+
+生产实现会把 `T×k` 条 assignment 按 expert 排序，形成连续 packed buffer，再用 grouped GEMM 一次处理多组不同大小的矩阵。概念伪代码如下：
+
+```python
+T = flat.shape[0]
+token_id = torch.arange(T, device=flat.device).repeat_interleave(top_k)
+expert_id = topk_ids.reshape(-1)
+gate = topk_weight.reshape(-1)
+
+# 相同 expert 的 assignment 排到一起。
+order = torch.argsort(expert_id)
+packed_token = token_id[order]
+packed_expert = expert_id[order]
+packed_gate = gate[order]
+packed_x = flat[packed_token]
+counts = torch.bincount(packed_expert, minlength=num_experts)
+
+# 这是抽象接口：真实实现由 fused/grouped GEMM kernel 完成。
+packed_y = grouped_swiglu(
+    packed_x,
+    packed_expert,
+    counts,
+    expert_weights,
+)
+
+out = torch.zeros_like(flat)
+out.index_add_(
+    0,
+    packed_token,
+    packed_y * packed_gate.unsqueeze(-1),
+)
+```
+
+高性能 kernel 还会融合部分 permutation、门控乘法和 combine；`argsort`/`bincount` 也不一定按这里的通用 PyTorch 算子逐个执行。上面代码只展示“按 expert 分桶→连续计算→按 token 加回”的不变量。
+
+在 Expert Parallel 中，逻辑又多一层：
+
+```text
+本卡 token
+  -> 按目标 expert owner 分桶
+  -> all-to-all 发送 activation
+  -> owner GPU 上 grouped expert GEMM
+  -> reverse all-to-all 返回结果
+  -> 按原 token id combine
+```
+
+expert 参数通常留在 owner GPU；跨卡移动的是 token activation 和必要的路由元数据，而不是每一步搬动整套 expert 权重。
+
+#### 1.3.7 反向传播与辅助损失哪里变了
+
+Dense FFN 中，所有 token 都更新同一套参数。MoE 中：
+
+- expert 只从路由给它的 token 接收梯度；没有 token 命中的 expert 在该 step 可能没有主任务梯度；
+- 当选中集合内的 combine weight 不是常数时（例如这里的 `k>1`），它对选中 gate 可导，因此 router 的选中分数能收到主任务梯度；
+- Top-k 的整数索引本身不可导，路由边界不会像普通连续层那样获得平滑梯度；
+- shared expert 每个 token 都执行，因此持续接收 dense 梯度；
+- load-balancing loss、router z-loss 等通常从 `router_logits`、概率或 assignment 统计单独计算，再加到语言模型损失上。
+
+本参考实现还有一个容易忽略的 Top-1 特例：若 `k=1` 且在选中集合内重新 softmax，combine weight 恒为 1，主任务损失不会通过该 weight 给 router 提供有效梯度，而离散 expert id 又不可导。实际 Top-1 router 因而必须依赖与论文一致的未重归一化 score、辅助目标或其他梯度设计，不能机械照抄本节的 selected-softmax。
+
+因此生产接口常常不只返回 hidden states，还返回路由统计：
+
+```python
+moe_out, route_state = self.ffn(self.ffn_norm(h))
+h = h + moe_out
+
+loss = lm_loss
+loss = loss + aux_coef * load_balance_loss(route_state)
+loss = loss + z_coef * router_z_loss(route_state.logits)
+```
+
+具体辅助损失必须与所采用的路由算法一致；不能看到 `topk_ids` 后随意拼一个“均匀化”公式。
+
+#### 1.3.8 用退化测试确认替换边界正确
+
+最有价值的第一个单元测试是令 `N=1,k=1`、关闭 shared expert，并把唯一 expert 的权重复制为 Dense FFN 权重：
+
+```python
+def test_one_expert_moe_equals_dense():
+    torch.manual_seed(0)
+    dense = SwiGLU(d_model=64, d_ff=128)
+    moe = ReferenceSparseMoE(
+        d_model=64,
+        expert_ffn_dim=128,
+        num_experts=1,
+        top_k=1,
+        shared_ffn_dim=None,
+    )
+    moe.experts[0].load_state_dict(dense.state_dict())
+
+    x = torch.randn(2, 7, 64)
+    torch.testing.assert_close(moe(x), dense(x))
+```
+
+此时唯一 gate 经 softmax 后恒为 1，MoE 应严格退化为 Dense FFN。这个测试若不通过，问题通常在 flatten/reshape、dispatch、combine 或权重布局，而不在“专家是否学会专业化”。
+
+还应至少检查：
+
+- 输出 shape/dtype/device 与输入一致；
+- 每个 token 恰好产生 `k` 条 assignment；
+- 每个 token 的选中 gate 权重之和接近 1；
+- `sum(T_e)=T×k`，且 combine 后没有 token 丢失；
+- 选中 expert、shared expert 的梯度为有限值；在 `k>1` 或采用可导的非恒定 Top-1 gate 时，再检查 router 主任务梯度；
+- checkpoint 保存/加载后 expert id 与权重一一对应。
+
+真实的 Dense→多专家初始化并不等于简单复制 96 份相同权重：完全相同的 expert 会带来对称性问题，函数保持还受 combine 归一化和 expert 宽度影响。初始化、稳定性与迁移的细节见后文第 11、16 章。
+
+#### 1.3.9 用一句代码差异总结
+
+```text
+Dense:
+    [T,d] -> one SwiGLU(d,f) -> [T,d]
+
+Sparse MoE:
+    [T,d] -> router/top-k
+          -> T×k assignments
+          -> dispatch by expert
+          -> grouped SwiGLU_e(d,f_e)
+          -> weighted combine by token
+          -> [T,d]
+```
+
+外部函数签名几乎没变；内部却从“一组权重上的规则 GEMM”变成了“离散路由、ragged token 分组、多套权重和可选跨卡通信”。这也是为什么 MoE 在模型公式上像一次局部替换，在训练系统上却是一次架构升级。
+
+### 1.4 “Mixture”不是把全部专家都算一遍
 
 经典的 dense mixture 会计算所有分支，再按概率加权；稀疏 MoE 则先做 Top-k，只计算少数分支。
 
@@ -177,7 +732,7 @@ $$
 
 例如 `N=96, k=6` 时，一个 token 只执行 `6/96=1/16` 的 routed expert 库。
 
-### 1.4 MoE 没有改变什么
+### 1.5 MoE 没有改变什么
 
 第一次接触 MoE 时，最容易把它误解成另一种 Transformer。实际上它通常没有改变：
 
@@ -199,7 +754,7 @@ MoE block:
     x -> attention -> residual -> router/dispatch/experts/combine -> residual
 ```
 
-### 1.5 为什么“容量更大”可能有帮助
+### 1.6 为什么“容量更大”可能有帮助
 
 粗略直觉是：Dense FFN 必须用同一组参数拟合所有 token 分布；MoE 允许不同 token 使用不同参数子集，理论上可以降低参数间的任务干扰，并增加条件容量。
 
@@ -212,7 +767,7 @@ MoE block:
 
 所以 MoE 提供的是**形成专业化的结构条件**，不是专业化本身的证明。
 
-### 1.6 MoE 的四层问题
+### 1.7 MoE 的四层问题
 
 理解现代 MoE，必须同时看四层：
 
@@ -225,7 +780,7 @@ MoE block:
 
 只理解第一层，还不能训练出一个高效 MoE。
 
-### 1.7 为什么通常把 FFN 做成 experts，而不是 attention
+### 1.8 为什么通常把 FFN 做成 experts，而不是 attention
 
 FFN 是最自然的条件计算位置：
 
