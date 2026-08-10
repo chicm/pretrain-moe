@@ -1,0 +1,1156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/chicm/pretrain-moe/configs/rfull/rfull_v0_1.schema.json",
+  "title": "R-Full v0.1 source configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run",
+    "model",
+    "moe",
+    "initialization",
+    "parallel",
+    "precision",
+    "optimizer",
+    "numerical",
+    "communication",
+    "data",
+    "stages",
+    "checkpoint",
+    "storage",
+    "evaluation",
+    "qualification",
+    "environment",
+    "launch"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "seed",
+        "successful_updates_target",
+        "target_tokens_per_update",
+        "target_tokens_total",
+        "failure_policy",
+        "max_committed_skips"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "successful_updates_target": {
+          "type": "integer"
+        },
+        "target_tokens_per_update": {
+          "type": "integer"
+        },
+        "target_tokens_total": {
+          "type": "integer"
+        },
+        "failure_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "max_committed_skips": {
+          "type": "integer"
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "tokenizer_native_vocab_size",
+        "padded_vocab_size",
+        "explicit_padded_vocab_override",
+        "hidden_size",
+        "num_layers",
+        "dense_layer_ids",
+        "moe_layer_ids",
+        "num_attention_heads",
+        "num_query_groups",
+        "kv_channels",
+        "attention_type",
+        "qk_rmsnorm",
+        "qk_norm_scale_size",
+        "normalization",
+        "norm_epsilon",
+        "dense_ffn_hidden_size",
+        "limited_swiglu_threshold",
+        "position_embedding",
+        "rotary_percent",
+        "rotary_base",
+        "max_position_embeddings",
+        "tie_word_embeddings",
+        "add_bias_linear",
+        "hidden_dropout",
+        "attention_dropout",
+        "mtp_layers",
+        "expected_total_parameters",
+        "expected_active_parameters"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tokenizer_native_vocab_size": {
+          "type": "integer"
+        },
+        "padded_vocab_size": {
+          "type": "integer"
+        },
+        "explicit_padded_vocab_override": {
+          "type": "boolean"
+        },
+        "hidden_size": {
+          "type": "integer"
+        },
+        "num_layers": {
+          "type": "integer"
+        },
+        "dense_layer_ids": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "integer"
+          }
+        },
+        "moe_layer_ids": {
+          "type": "array",
+          "minItems": 46,
+          "maxItems": 46,
+          "items": {
+            "type": "integer"
+          }
+        },
+        "num_attention_heads": {
+          "type": "integer"
+        },
+        "num_query_groups": {
+          "type": "integer"
+        },
+        "kv_channels": {
+          "type": "integer"
+        },
+        "attention_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "qk_rmsnorm": {
+          "type": "boolean"
+        },
+        "qk_norm_scale_size": {
+          "type": "integer"
+        },
+        "normalization": {
+          "type": "string",
+          "minLength": 1
+        },
+        "norm_epsilon": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dense_ffn_hidden_size": {
+          "type": "integer"
+        },
+        "limited_swiglu_threshold": {
+          "type": "integer"
+        },
+        "position_embedding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rotary_percent": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rotary_base": {
+          "type": "integer"
+        },
+        "max_position_embeddings": {
+          "type": "integer"
+        },
+        "tie_word_embeddings": {
+          "type": "boolean"
+        },
+        "add_bias_linear": {
+          "type": "boolean"
+        },
+        "hidden_dropout": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attention_dropout": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mtp_layers": {
+          "type": "integer"
+        },
+        "expected_total_parameters": {
+          "type": "integer"
+        },
+        "expected_active_parameters": {
+          "type": "integer"
+        }
+      }
+    },
+    "moe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "num_routed_experts",
+        "top_k",
+        "expert_ffn_hidden_size",
+        "shared_experts",
+        "shared_expert_hidden_size",
+        "shared_expert_gate",
+        "router_parameter_dtype",
+        "router_compute_dtype",
+        "forward_gate",
+        "aux_probability",
+        "aux_statistics_scope",
+        "aux_aggregation",
+        "aux_loss_granularity",
+        "aux_loss_coefficient",
+        "z_loss_coefficient",
+        "router_init_std",
+        "dropless",
+        "capacity_factor",
+        "token_drop",
+        "token_dispatcher",
+        "dispatch_width",
+        "grouped_gemm",
+        "shared_expert_overlap"
+      ],
+      "properties": {
+        "num_routed_experts": {
+          "type": "integer"
+        },
+        "top_k": {
+          "type": "integer"
+        },
+        "expert_ffn_hidden_size": {
+          "type": "integer"
+        },
+        "shared_experts": {
+          "type": "integer"
+        },
+        "shared_expert_hidden_size": {
+          "type": "integer"
+        },
+        "shared_expert_gate": {
+          "type": "boolean"
+        },
+        "router_parameter_dtype": {
+          "type": "string",
+          "minLength": 1
+        },
+        "router_compute_dtype": {
+          "type": "string",
+          "minLength": 1
+        },
+        "forward_gate": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aux_probability": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aux_statistics_scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aux_aggregation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aux_loss_granularity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aux_loss_coefficient": {
+          "type": "string",
+          "minLength": 1
+        },
+        "z_loss_coefficient": {
+          "type": "string",
+          "minLength": 1
+        },
+        "router_init_std": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dropless": {
+          "type": "boolean"
+        },
+        "capacity_factor": {
+          "type": "null"
+        },
+        "token_drop": {
+          "type": "boolean"
+        },
+        "token_dispatcher": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dispatch_width": {
+          "type": "integer"
+        },
+        "grouped_gemm": {
+          "type": "boolean"
+        },
+        "shared_expert_overlap": {
+          "type": "boolean"
+        }
+      }
+    },
+    "initialization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_std",
+        "residual_output_std",
+        "norm_scale"
+      ],
+      "properties": {
+        "base_std": {
+          "type": "string",
+          "minLength": 1
+        },
+        "residual_output_std": {
+          "type": "string",
+          "minLength": 1
+        },
+        "norm_scale": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "parallel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "world_size",
+        "nodes",
+        "gpus_per_node",
+        "rank_order",
+        "tensor_parallel",
+        "pipeline_parallel",
+        "context_parallel",
+        "expert_parallel",
+        "batch_data_parallel",
+        "expert_data_parallel",
+        "experts_per_rank_per_moe_layer",
+        "expert_parallel_node_local",
+        "distributed_optimizer"
+      ],
+      "properties": {
+        "world_size": {
+          "type": "integer"
+        },
+        "nodes": {
+          "type": "integer"
+        },
+        "gpus_per_node": {
+          "type": "integer"
+        },
+        "rank_order": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tensor_parallel": {
+          "type": "integer"
+        },
+        "pipeline_parallel": {
+          "type": "integer"
+        },
+        "context_parallel": {
+          "type": "integer"
+        },
+        "expert_parallel": {
+          "type": "integer"
+        },
+        "batch_data_parallel": {
+          "type": "integer"
+        },
+        "expert_data_parallel": {
+          "type": "integer"
+        },
+        "experts_per_rank_per_moe_layer": {
+          "type": "integer"
+        },
+        "expert_parallel_node_local": {
+          "type": "boolean"
+        },
+        "distributed_optimizer": {
+          "type": "boolean"
+        }
+      }
+    },
+    "precision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_parameters",
+        "router_compute",
+        "loss_reduction",
+        "gradient_buffer",
+        "reduce_scatter_wire",
+        "parameter_all_gather_wire",
+        "optimizer_state",
+        "loss_scale",
+        "tf32",
+        "fp8",
+        "fp4"
+      ],
+      "properties": {
+        "model_parameters": {
+          "type": "string",
+          "minLength": 1
+        },
+        "router_compute": {
+          "type": "string",
+          "minLength": 1
+        },
+        "loss_reduction": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gradient_buffer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reduce_scatter_wire": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parameter_all_gather_wire": {
+          "type": "string",
+          "minLength": 1
+        },
+        "optimizer_state": {
+          "type": "string",
+          "minLength": 1
+        },
+        "loss_scale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tf32": {
+          "type": "boolean"
+        },
+        "fp8": {
+          "type": "boolean"
+        },
+        "fp4": {
+          "type": "boolean"
+        }
+      }
+    },
+    "optimizer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "beta1",
+        "beta2",
+        "epsilon",
+        "weight_decay",
+        "peak_lr",
+        "min_lr",
+        "warmup_updates",
+        "stable_through_update",
+        "cosine_decay_updates",
+        "grad_clip",
+        "label_smoothing",
+        "schedule_version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "beta1": {
+          "type": "string",
+          "minLength": 1
+        },
+        "beta2": {
+          "type": "string",
+          "minLength": 1
+        },
+        "epsilon": {
+          "type": "string",
+          "minLength": 1
+        },
+        "weight_decay": {
+          "type": "string",
+          "minLength": 1
+        },
+        "peak_lr": {
+          "type": "string",
+          "minLength": 1
+        },
+        "min_lr": {
+          "type": "string",
+          "minLength": 1
+        },
+        "warmup_updates": {
+          "type": "integer"
+        },
+        "stable_through_update": {
+          "type": "integer"
+        },
+        "cosine_decay_updates": {
+          "type": "integer"
+        },
+        "grad_clip": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label_smoothing": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schedule_version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "numerical": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finite_consensus_scope",
+        "scan_forward",
+        "scan_gradients",
+        "scan_post_update_parameters",
+        "scan_post_update_optimizer_state",
+        "on_failure",
+        "large_finite_norm_action"
+      ],
+      "properties": {
+        "finite_consensus_scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scan_forward": {
+          "type": "boolean"
+        },
+        "scan_gradients": {
+          "type": "boolean"
+        },
+        "scan_post_update_parameters": {
+          "type": "boolean"
+        },
+        "scan_post_update_optimizer_state": {
+          "type": "boolean"
+        },
+        "on_failure": {
+          "type": "string",
+          "minLength": 1
+        },
+        "large_finite_norm_action": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "communication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activation_dtype_bytes",
+        "a2a_forward_bytes_per_token",
+        "a2a_ep8_remote_forward_bytes_per_token",
+        "rank_target_tokens_per_update",
+        "a2a_remote_forward_sent_bytes_per_rank_update",
+        "a2a_remote_forward_backward_sent_bytes_per_rank_update",
+        "a2a_nic_tx_rx_bytes_per_rank_update",
+        "moe_recompute_enabled",
+        "common_raw_fp32_gradient_bytes",
+        "common_raw_bf16_parameter_bytes",
+        "local_routed_raw_fp32_gradient_bytes",
+        "local_routed_raw_bf16_parameter_bytes"
+      ],
+      "properties": {
+        "activation_dtype_bytes": {
+          "type": "integer"
+        },
+        "a2a_forward_bytes_per_token": {
+          "type": "integer"
+        },
+        "a2a_ep8_remote_forward_bytes_per_token": {
+          "type": "integer"
+        },
+        "rank_target_tokens_per_update": {
+          "type": "integer"
+        },
+        "a2a_remote_forward_sent_bytes_per_rank_update": {
+          "type": "integer"
+        },
+        "a2a_remote_forward_backward_sent_bytes_per_rank_update": {
+          "type": "integer"
+        },
+        "a2a_nic_tx_rx_bytes_per_rank_update": {
+          "type": "integer"
+        },
+        "moe_recompute_enabled": {
+          "type": "boolean"
+        },
+        "common_raw_fp32_gradient_bytes": {
+          "type": "integer"
+        },
+        "common_raw_bf16_parameter_bytes": {
+          "type": "integer"
+        },
+        "local_routed_raw_fp32_gradient_bytes": {
+          "type": "integer"
+        },
+        "local_routed_raw_bf16_parameter_bytes": {
+          "type": "integer"
+        }
+      }
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tokenizer_identifier",
+        "tokenizer_revision",
+        "tokenizer_artifact_sha256",
+        "eot_id",
+        "payload_dtype",
+        "add_special_tokens",
+        "add_bos",
+        "append_eos",
+        "max_payload_id_exclusive",
+        "window_algorithm",
+        "source_scheduler",
+        "source_cycle_sequences",
+        "corpus_manifest_sha256",
+        "holdout_manifest_sha256",
+        "stage_manifest_sha256",
+        "sources"
+      ],
+      "properties": {
+        "tokenizer_identifier": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tokenizer_revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tokenizer_artifact_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "eot_id": {
+          "type": "integer"
+        },
+        "payload_dtype": {
+          "type": "string",
+          "minLength": 1
+        },
+        "add_special_tokens": {
+          "type": "boolean"
+        },
+        "add_bos": {
+          "type": "boolean"
+        },
+        "append_eos": {
+          "type": "boolean"
+        },
+        "max_payload_id_exclusive": {
+          "type": "integer"
+        },
+        "window_algorithm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_scheduler": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_cycle_sequences": {
+          "type": "integer"
+        },
+        "corpus_manifest_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "holdout_manifest_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stage_manifest_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "weight_numerator",
+              "indexed_payload_tokens"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "weight_numerator": {
+                "type": "integer"
+              },
+              "indexed_payload_tokens": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      }
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "sequence_length",
+          "global_sequence_batch",
+          "micro_batch_size",
+          "gradient_accumulation",
+          "successful_updates",
+          "source_sequences"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sequence_length": {
+            "type": "integer"
+          },
+          "global_sequence_batch": {
+            "type": "integer"
+          },
+          "micro_batch_size": {
+            "type": "integer"
+          },
+          "gradient_accumulation": {
+            "type": "integer"
+          },
+          "successful_updates": {
+            "type": "integer"
+          },
+          "source_sequences": {
+            "type": "array",
+            "minItems": 8,
+            "maxItems": 8,
+            "items": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "schema_version",
+        "interval_successful_updates",
+        "rolling_full_keep",
+        "permanent_successful_updates",
+        "weights_only_interval_successful_updates",
+        "atomic_commit_marker",
+        "final_dcp_replicas",
+        "commit_marker_schema_version",
+        "commit_marker_encoding",
+        "commit_marker_hash_algorithm",
+        "commit_marker_required_fields",
+        "committed_state_required",
+        "raw_attempted_batches_counter",
+        "restore_policy",
+        "stage_resume_policy",
+        "root_manifest_schema_version",
+        "latest_committed_pointer",
+        "latest_committed_pointer_schema_version",
+        "latest_pointer_update_policy"
+      ],
+      "properties": {
+        "format": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "interval_successful_updates": {
+          "type": "integer"
+        },
+        "rolling_full_keep": {
+          "type": "integer"
+        },
+        "permanent_successful_updates": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "items": {
+            "type": "integer"
+          }
+        },
+        "weights_only_interval_successful_updates": {
+          "type": "integer"
+        },
+        "atomic_commit_marker": {
+          "type": "string",
+          "minLength": 1
+        },
+        "final_dcp_replicas": {
+          "type": "integer"
+        },
+        "commit_marker_schema_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit_marker_encoding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit_marker_hash_algorithm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit_marker_required_fields": {
+          "type": "array",
+          "minItems": 11,
+          "maxItems": 11,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "committed_state_required": {
+          "type": "array",
+          "minItems": 26,
+          "maxItems": 26,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "raw_attempted_batches_counter": {
+          "type": "string",
+          "minLength": 1
+        },
+        "restore_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stage_resume_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "root_manifest_schema_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "latest_committed_pointer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "latest_committed_pointer_schema_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "latest_pointer_update_policy": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "full_checkpoint_payload_bytes_14_per_parameter",
+        "full_checkpoint_payload_bytes_16_per_parameter",
+        "weights_only_payload_bytes",
+        "retained_full_checkpoints",
+        "retained_weights_only_artifacts",
+        "transient_full_checkpoint_equivalents",
+        "conservative_artifact_peak_bytes",
+        "indexed_corpus_payload_bytes",
+        "co_resident_peak_before_reserve_bytes",
+        "reserve_basis_points",
+        "required_artifact_only_usable_bytes",
+        "required_co_resident_usable_bytes",
+        "site_overhead_included"
+      ],
+      "properties": {
+        "full_checkpoint_payload_bytes_14_per_parameter": {
+          "type": "integer"
+        },
+        "full_checkpoint_payload_bytes_16_per_parameter": {
+          "type": "integer"
+        },
+        "weights_only_payload_bytes": {
+          "type": "integer"
+        },
+        "retained_full_checkpoints": {
+          "type": "integer"
+        },
+        "retained_weights_only_artifacts": {
+          "type": "integer"
+        },
+        "transient_full_checkpoint_equivalents": {
+          "type": "integer"
+        },
+        "conservative_artifact_peak_bytes": {
+          "type": "integer"
+        },
+        "indexed_corpus_payload_bytes": {
+          "type": "integer"
+        },
+        "co_resident_peak_before_reserve_bytes": {
+          "type": "integer"
+        },
+        "reserve_basis_points": {
+          "type": "integer"
+        },
+        "required_artifact_only_usable_bytes": {
+          "type": "integer"
+        },
+        "required_co_resident_usable_bytes": {
+          "type": "integer"
+        },
+        "site_overhead_included": {
+          "type": "boolean"
+        }
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "holdout_algorithm",
+        "master_windows_per_source",
+        "eval_harness_commit",
+        "eval_dataset_manifest_sha256",
+        "eval_prompt_manifest_sha256",
+        "holdout_candidate_selection",
+        "holdout_document_exclusion",
+        "holdout_insufficient_candidates",
+        "holdout_membership_unit"
+      ],
+      "properties": {
+        "holdout_algorithm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "master_windows_per_source": {
+          "type": "integer"
+        },
+        "eval_harness_commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "eval_dataset_manifest_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "eval_prompt_manifest_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "holdout_candidate_selection": {
+          "type": "string",
+          "minLength": 1
+        },
+        "holdout_document_exclusion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "holdout_insufficient_candidates": {
+          "type": "string",
+          "minLength": 1
+        },
+        "holdout_membership_unit": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_schema_version",
+        "limited_swiglu_evidence_sha256",
+        "router_initialization_evidence_sha256",
+        "ep_global_aux_evidence_sha256",
+        "finite_consensus_evidence_sha256",
+        "strict_replay_checkpoint_evidence_sha256",
+        "expert_optimizer_sharding_evidence_sha256",
+        "topology_collective_evidence_sha256",
+        "rocm_kernel_qualification_evidence_sha256",
+        "checkpoint_throughput_restore_evidence_sha256",
+        "storage_signoff_evidence_sha256",
+        "burn_in_evidence_sha256"
+      ],
+      "properties": {
+        "evidence_schema_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "limited_swiglu_evidence_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "router_initialization_evidence_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ep_global_aux_evidence_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "finite_consensus_evidence_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "strict_replay_checkpoint_evidence_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expert_optimizer_sharding_evidence_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "topology_collective_evidence_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rocm_kernel_qualification_evidence_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "checkpoint_throughput_restore_evidence_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "storage_signoff_evidence_sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "burn_in_evidence_sha256": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "container_digest",
+        "rocm_version",
+        "pytorch_commit_or_build",
+        "megatron_fork_commit",
+        "megatron_core_commit",
+        "rccl_version",
+        "grouped_gemm_backend_commit",
+        "attention_backend_commit",
+        "fused_ce_backend_commit"
+      ],
+      "properties": {
+        "container_digest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rocm_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pytorch_commit_or_build": {
+          "type": "string",
+          "minLength": 1
+        },
+        "megatron_fork_commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "megatron_core_commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rccl_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "grouped_gemm_backend_commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attention_backend_commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fused_ce_backend_commit": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "launch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mcore_argv_adapter",
+        "allow_unresolved_blockers",
+        "long_context_continuation_enabled"
+      ],
+      "properties": {
+        "mcore_argv_adapter": {
+          "type": "string",
+          "minLength": 1
+        },
+        "allow_unresolved_blockers": {
+          "type": "boolean"
+        },
+        "long_context_continuation_enabled": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
