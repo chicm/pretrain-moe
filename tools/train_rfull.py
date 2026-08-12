@@ -41,6 +41,10 @@ from rfull.dataset import (  # noqa: E402
 )
 from rfull.finite_consensus import check_update_or_die  # noqa: E402
 from rfull.grad_reduce import allreduce_gradients  # noqa: E402
+from megatron.core.transformer.moe.moe_utils import (  # noqa: E402
+    clear_aux_losses_tracker,
+)
+from rfull.dispatcher_cleanup import clear_dispatcher_state  # noqa: E402
 from rfull.model_spec import GEOMETRY  # noqa: E402
 from rfull.router_tap import attach_router_tap, pop_router_logits  # noqa: E402
 
@@ -202,6 +206,21 @@ def main():
         for g in opt.param_groups:
             g["lr"] = lr
         opt.zero_grad(set_to_none=True)
+
+        # MCore's TopKRouter stashes its own aux/z losses in a module-level
+        # tracker (save_to_aux_losses_tracker). Those entries hold live graph
+        # tensors, and nothing in this loop consumes them -- R-Full computes its
+        # own EP-global aux loss from the router tap instead. Left alone, the
+        # next backward walks into the previous step's freed graph:
+        #   RuntimeError: Trying to backward through the graph a second time
+        # It passes update 1 and fails on update 2, which is exactly what the
+        # first real two-node run did.
+        # MCore's token dispatcher caches its per-step working set on the module
+        # (probs, routing_map, split tables) and never releases it, leaving 332
+        # live tensors per update with 46 MoE layers. Without this the process
+        # is OOM-killed within a few updates.
+        clear_dispatcher_state(model)
+        clear_aux_losses_tracker()
 
         t_start = time.time()
         tot_loss = 0.0

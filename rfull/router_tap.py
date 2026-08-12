@@ -27,6 +27,7 @@ class RouterTap:
     def __init__(self):
         self.records: List[Tuple[torch.Tensor, torch.Tensor]] = []
         self._handles = []
+        self._routers = []
         self.n_taps = 0
 
     def _hook(self, module, inputs, output):
@@ -34,6 +35,11 @@ class RouterTap:
         # routing_map is a BOOLEAN [T, num_experts] mask -- NOT [T, k] indices.
         # The frozen aux loss wants top-k indices, so convert here.
         logits = getattr(module, "_rfull_last_logits", None)
+        # Clear immediately. The attribute keeps a live reference to a graph
+        # tensor, and leaving it set makes the NEXT step's backward walk into
+        # the previous step's freed graph:
+        #   RuntimeError: Trying to backward through the graph a second time
+        module._rfull_last_logits = None
         if logits is None or not isinstance(output, (tuple, list)):
             return
         routing_map = output[1]
@@ -60,6 +66,7 @@ class RouterTap:
             if name.endswith("mlp.router"):
                 self._wrap_gating(mod)
                 self._handles.append(mod.register_forward_hook(self._hook))
+                self._routers.append(mod)
                 self.n_taps += 1
         return self.n_taps
 
@@ -83,8 +90,23 @@ class RouterTap:
         router._rfull_gating_wrapped = True
 
     def pop(self):
+        """Drain the buffer. Must be called once per micro-batch.
+
+        Anything still buffered here belongs to a graph that backward has
+        already freed, so it must never survive into the next step.
+        """
         recs, self.records = self.records, []
         return recs
+
+    def clear(self):
+        """Drop buffered records and any retained logits without consuming them.
+
+        Used on the error path: if a step aborts between forward and backward,
+        the stale graph references must go before the next forward runs.
+        """
+        self.records = []
+        for mod in self._routers:
+            mod._rfull_last_logits = None
 
     def detach_hooks(self):
         for h in self._handles:

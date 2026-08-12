@@ -27,8 +27,6 @@ from typing import Iterable, List
 import torch
 import torch.distributed as dist
 
-from megatron.core import parallel_state as ps
-
 __all__ = ["allreduce_gradients", "split_expert_params"]
 
 _DEFAULT_BUCKET_BYTES = 128 << 20
@@ -58,22 +56,36 @@ def split_expert_params(model: torch.nn.Module):
 
 
 def _flush(bucket: List[torch.Tensor], group, world: int) -> None:
+    """All-reduce one bucket of gradients and scatter the result back.
+
+    Flattening is done with ``contiguous().view(-1)`` and restored with
+    ``reshape``. The obvious ``reshape(-1)`` / ``view_as`` pairing happens to
+    produce correct values on CPU, but ``reshape(-1)`` silently returns a copy
+    for a non-contiguous tensor while ``view_as`` demands a compatible layout,
+    so the pairing is only accidentally safe. Being explicit costs nothing.
+
+    NOTE: this was tightened while investigating a two-node
+    "Memory access fault by GPU ... Reason: Unknown", but a CPU regression test
+    showed the old form still returned correct values, so it is NOT established
+    as the cause of that fault. The fault remains under investigation.
+    """
     if not bucket:
         return
     if len(bucket) == 1:
         g = bucket[0]
-        buf = g.float()
+        buf = g.detach().float().contiguous()
         dist.all_reduce(buf, group=group)
         buf /= world
-        g.copy_(buf.to(g.dtype))
+        g.copy_(buf.reshape(g.shape).to(g.dtype))
         return
-    flat = torch.cat([g.reshape(-1).float() for g in bucket])
+    flat = torch.cat([g.detach().float().contiguous().view(-1)
+                      for g in bucket])
     dist.all_reduce(flat, group=group)
     flat /= world
     off = 0
     for g in bucket:
         n = g.numel()
-        g.copy_(flat[off:off + n].view_as(g).to(g.dtype))
+        g.copy_(flat[off:off + n].reshape(g.shape).to(g.dtype))
         off += n
 
 
@@ -107,6 +119,9 @@ def allreduce_gradients(model: torch.nn.Module,
     Must be called after backward and BEFORE gradient clipping, so that every
     rank clips an identical gradient and stays in lockstep.
     """
+    # Imported lazily so the pure-tensor helpers stay testable without Megatron.
+    from megatron.core import parallel_state as ps
+
     expert, dense = split_expert_params(model)
     _reduce_group(dense, ps.get_data_parallel_group(), bucket_bytes)
     _reduce_group(expert, ps.get_expert_data_parallel_group(), bucket_bytes)
