@@ -26,6 +26,7 @@ import math
 import os
 import sys
 import time
+import datetime
 from pathlib import Path
 
 import torch
@@ -108,9 +109,19 @@ def main():
                     choices=["none", "full", "selective"],
                     help="activation checkpointing; 'full' is required to fit "
                          "48 layers of 25.86B at seq 4096 with optimizer state")
+    ap.add_argument("--coll-timeout", type=int, default=5400,
+                    help="NCCL collective timeout in seconds; the default 600 "
+                         "aborts healthy runs during latency spikes")
     args = ap.parse_args()
 
-    dist.init_process_group("nccl")
+    # The default 600 s collective timeout is too tight for this stack. Deep MoE
+    # steps on this ROCm/RCCL build have a ~1.7 s floor but intermittently take
+    # 200-660 s, and a single spike past the watchdog aborts the whole world.
+    # The spikes are a scheduling pathology, not a hang: split tables balance,
+    # raw RCCL replays the same traffic cleanly, and progress always resumes.
+    # Raise the ceiling so a slow step costs throughput instead of the run.
+    dist.init_process_group(
+        "nccl", timeout=datetime.timedelta(seconds=args.coll_timeout))
     rank = dist.get_rank()
     world = dist.get_world_size()
     local_rank = int(os.environ.get("LOCAL_RANK", rank % 8))
@@ -135,6 +146,28 @@ def main():
         context_parallel_size=1,
     )
     model_parallel_cuda_manual_seed(args.seed)
+
+    # Eagerly build every NCCL communicator we will use. NCCL creates a
+    # communicator on a group's first collective, and that creation is itself a
+    # rendezvous: the first rank to arrive blocks until all peers arrive. When
+    # ranks are skewed -- one still in a cold blobfuse read while peers finished
+    # forward -- the early ranks burn the timeout waiting inside communicator
+    # setup, which surfaces as the misleading
+    #   "[15] is setting up NCCL communicator and retrieving ncclUniqueId
+    #    from [0] ... store->get('0') got error: wait timeout after 600000ms"
+    # That message names a store key, not a network fault; the real cause is a
+    # peer that had not reached the same collective yet. Paying the rendezvous
+    # here, while all ranks are provably at the same point, removes the ambiguity
+    # from every later collective and makes a genuine hang mean what it says.
+    warm = torch.ones(1, device=dev)
+    for name, grp in (("world", None),
+                      ("expert", ps.get_expert_model_parallel_group()),
+                      ("data", ps.get_data_parallel_group()),
+                      ("expert-data", ps.get_expert_data_parallel_group())):
+        dist.all_reduce(warm, group=grp)
+    torch.cuda.synchronize()
+    dist.barrier()
+    log0("all NCCL communicators established")
 
     # Deep MoE stacks on this ROCm/RCCL build suffer severe intermittent
     # latency spikes inside the EP all-to-all: a step whose floor is ~1.7 s can
