@@ -64,6 +64,13 @@ class RouterTap:
         """Hook every router; also wrap ``gating`` to retain FP32 logits."""
         for name, mod in model.named_modules():
             if name.endswith("mlp.router"):
+                if getattr(mod, "_rfull_tapped", False):
+                    # Attaching twice would register a second forward hook on
+                    # the same router (register_forward_hook has no dedup), so
+                    # each forward would append two records per layer while
+                    # n_taps still reported one. Guard on the module itself.
+                    continue
+                mod._rfull_tapped = True
                 self._wrap_gating(mod)
                 self._handles.append(mod.register_forward_hook(self._hook))
                 self._routers.append(mod)

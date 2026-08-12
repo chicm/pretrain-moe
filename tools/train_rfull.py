@@ -270,7 +270,16 @@ def main():
         # first pop_router_logits(), leave every later micro-batch with an empty
         # aux term. Use the source's own count.
         n_micro = src.ga
+        # Start every update from an empty tap. If a previous update aborted
+        # between forward and backward -- a non-finite loss, a spike that tripped
+        # a timeout, any raised exception -- its records are still buffered and
+        # reference a graph that is already freed. They would then be appended to
+        # by this update's forward, so the count comes out as a multiple of the
+        # layer count (92 for 46 layers) and backward walks a dead graph. The
+        # assertion below only catches that; this prevents it.
+        tap.clear()
         for tokens, labels, wins in src.update_batches(successful_updates):
+
             t_data += time.time() - t_fetch0
             tokens = tokens.to(dev, non_blocking=True)
             labels = labels.to(dev, non_blocking=True)
