@@ -226,7 +226,10 @@ def main():
         tot_loss = 0.0
         tot_ce = 0.0
         tot_aux = 0.0
+        t_data = 0.0
+        t_fetch0 = time.time()
         for tokens, labels, wins in src.update_batches(successful_updates):
+            t_data += time.time() - t_fetch0
             tokens = tokens.to(dev, non_blocking=True)
             labels = labels.to(dev, non_blocking=True)
             pos = torch.arange(tokens.size(1), device=dev).unsqueeze(0)
@@ -256,6 +259,7 @@ def main():
             tot_loss += float(loss.detach()) / args.grad_accum
             tot_ce += float(ce.detach()) / args.grad_accum
             tot_aux += float(aux.detach()) / args.grad_accum
+            t_fetch0 = time.time()
 
         # Gradients must be averaged across the data-parallel groups BEFORE
         # clipping, otherwise every rank clips a different local gradient and
@@ -269,7 +273,9 @@ def main():
         # Routed experts are EP-sharded, so they are averaged over the
         # expert-data-parallel group; everything else over the regular
         # data-parallel group.
+        t_r0 = time.time()
         allreduce_gradients(model, bucket_bytes=args.reduce_bucket_mb << 20)
+        t_reduce = time.time() - t_r0
 
         # World-consensus finite check BEFORE any optimizer state is touched.
         # Rejection raises: no silent skip, no partial commit.
@@ -285,6 +291,7 @@ def main():
                  f"ce {tot_ce:8.4f}  aux {tot_aux:.5f}  "
                  f"gnorm {float(gnorm):7.3f}  lr {lr:.3e}  "
                  f"{dt:6.2f}s  {toks/dt/1e3:8.1f}K tok/s  "
+                 f"data {t_data:5.1f}s  redu {t_reduce:5.1f}s  "
                  f"mem {torch.cuda.max_memory_allocated()/2**30:.1f}GiB")
         hist.append({"update": successful_updates, "loss": tot_loss,
                      "ce": tot_ce, "aux": tot_aux,

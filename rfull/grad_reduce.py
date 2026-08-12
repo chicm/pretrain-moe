@@ -96,20 +96,42 @@ def _reduce_group(params: Iterable[torch.nn.Parameter], group,
     world = dist.get_world_size(group)
     if world <= 1:
         return
+
+    # A bucketed reducer is a collective SCHEDULE: every rank in the group must
+    # issue the same number of all_reduce calls, in the same order, with the
+    # same sizes. Bucket boundaries are derived from each rank's own gradient
+    # list, so if the ranks disagree about which parameters have gradients they
+    # build different numbers of buckets and deadlock -- one rank waits on a
+    # call the other never makes, and it surfaces 600 s later as
+    #   DistBackendError: ... is setting up NCCL communicator ... wait timeout
+    # Build the plan first, then verify all ranks agree before communicating.
+    grads = [p.grad for p in params if p.grad is not None]
+    plan: List[List[torch.Tensor]] = []
     bucket: List[torch.Tensor] = []
     nbytes = 0
-    for p in params:
-        g = p.grad
-        if g is None:
-            continue
-        # float32 accumulation: bucket cost is 4 bytes per element
-        b = g.numel() * 4
+    for g in grads:
+        b = g.numel() * 4              # float32 accumulation
         if bucket and nbytes + b > bucket_bytes:
-            _flush(bucket, group, world)
+            plan.append(bucket)
             bucket, nbytes = [], 0
         bucket.append(g)
         nbytes += b
-    _flush(bucket, group, world)
+    if bucket:
+        plan.append(bucket)
+
+    n = torch.tensor([len(plan), len(grads)], dtype=torch.int64,
+                     device=grads[0].device if grads else "cpu")
+    alln = [torch.zeros_like(n) for _ in range(world)]
+    dist.all_gather(alln, n, group=group)
+    if any(not torch.equal(x, alln[0]) for x in alln):
+        detail = ", ".join(f"rank{i}:buckets={int(x[0])},grads={int(x[1])}"
+                           for i, x in enumerate(alln))
+        raise RuntimeError(
+            "expert-DP gradient reduction plan differs across ranks, which "
+            f"would deadlock: {detail}")
+
+    for bucket in plan:
+        _flush(bucket, group, world)
 
 
 def allreduce_gradients(model: torch.nn.Module,
