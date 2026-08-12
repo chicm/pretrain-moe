@@ -154,6 +154,13 @@ def main():
         pipeline_model_parallel_size=1,
         expert_model_parallel_size=ep,
         context_parallel_size=1,
+        # MCore creates the expert, data, and expert-data subgroups itself and
+        # gives each its own timeout from this argument -- it does not inherit
+        # the one passed to init_process_group. The stall happens inside
+        # EXPERT_MODEL_PARALLEL_GROUP's all-to-all, so leaving this at the
+        # default is exactly the case that matters, and a widened world timeout
+        # alone changes nothing.
+        distributed_timeout_minutes=max(1, args.coll_timeout // 60),
     )
     model_parallel_cuda_manual_seed(args.seed)
 
