@@ -209,6 +209,7 @@ def main():
             f"{GEOMETRY.expected_total_params:,}")
 
     tap = attach_router_tap(model)
+    n_moe_layers = tap.n_taps
     log0(f"router taps attached: {tap.n_taps} (expected {GEOMETRY.num_moe_layers})")
     if tap.n_taps != GEOMETRY.num_moe_layers:
         raise SystemExit(
@@ -261,6 +262,14 @@ def main():
         tot_aux = 0.0
         t_data = 0.0
         t_fetch0 = time.time()
+        # The number of micro-batches is decided by the data source, which
+        # derives it from the frozen curriculum (tokens per update / tokens per
+        # micro-batch / lanes). --grad-accum is only a CLI override and defaults
+        # to 1, so scaling the loss by it while looping src.ga times would both
+        # mis-weight the average and, because the router tap is drained by the
+        # first pop_router_logits(), leave every later micro-batch with an empty
+        # aux term. Use the source's own count.
+        n_micro = src.ga
         for tokens, labels, wins in src.update_batches(successful_updates):
             t_data += time.time() - t_fetch0
             tokens = tokens.to(dev, non_blocking=True)
@@ -275,6 +284,13 @@ def main():
             # router logits. Collected by the model spec during forward.
             aux = torch.zeros((), device=dev, dtype=torch.float32)
             recs = pop_router_logits(model)
+            if len(recs) != n_moe_layers:
+                raise RuntimeError(
+                    f"router tap returned {len(recs)} records, expected "
+                    f"{n_moe_layers} (one per MoE layer). An empty or short "
+                    "list means the balancing loss is silently absent for this "
+                    "micro-batch, which trains an unbalanced router while the "
+                    "logged aux term still looks plausible.")
             for rlogits, ridx in recs:
                 a, _ = ep_global_aux_loss(
                     rlogits, ridx,
@@ -288,10 +304,10 @@ def main():
                 aux = aux / len(recs)
 
             loss = ce + aux
-            (loss / args.grad_accum).backward()
-            tot_loss += float(loss.detach()) / args.grad_accum
-            tot_ce += float(ce.detach()) / args.grad_accum
-            tot_aux += float(aux.detach()) / args.grad_accum
+            (loss / n_micro).backward()
+            tot_loss += float(loss.detach()) / n_micro
+            tot_ce += float(ce.detach()) / n_micro
+            tot_aux += float(aux.detach()) / n_micro
             t_fetch0 = time.time()
 
         # Gradients must be averaged across the data-parallel groups BEFORE
