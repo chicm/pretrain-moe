@@ -45,7 +45,9 @@ from rfull.grad_reduce import allreduce_gradients  # noqa: E402
 from megatron.core.transformer.moe.moe_utils import (  # noqa: E402
     clear_aux_losses_tracker,
 )
-from rfull.dispatcher_cleanup import clear_dispatcher_state  # noqa: E402
+from rfull.dispatcher_cleanup import clear_dispatcher_state
+from rfull.checkpoint import (save_checkpoint, load_checkpoint,
+                             latest_checkpoint, sweep_stale)  # noqa: E402
 from rfull.model_spec import GEOMETRY  # noqa: E402
 from rfull.router_tap import attach_router_tap, pop_router_logits  # noqa: E402
 
@@ -109,6 +111,14 @@ def main():
                     choices=["none", "full", "selective"],
                     help="activation checkpointing; 'full' is required to fit "
                          "48 layers of 25.86B at seq 4096 with optimizer state")
+    ap.add_argument("--ckpt-dir", type=str, default="/scratch/rfull_ckpt",
+                    help="checkpoint root; committed state is named by "
+                         "LATEST_COMMITTED inside it")
+    ap.add_argument("--save-every", type=int, default=0,
+                    help="commit a checkpoint every N updates; 0 disables")
+    ap.add_argument("--keep-checkpoints", type=int, default=3)
+    ap.add_argument("--resume", action="store_true",
+                    help="resume from LATEST_COMMITTED if present")
     ap.add_argument("--coll-timeout", type=int, default=5400,
                     help="NCCL collective timeout in seconds; the default 600 "
                          "aborts healthy runs during latency spikes")
@@ -234,6 +244,16 @@ def main():
          f"(AdamW exp_avg+exp_avg_sq are allocated lazily on first step)")
 
     successful_updates = 0
+    if args.resume:
+        # The cursor is restored from the checkpoint payload, not from a
+        # separate file, so weights and data position cannot drift apart. The
+        # scheduler derives its position from this number alone.
+        successful_updates = load_checkpoint(args.ckpt_dir, model, opt)
+        if successful_updates:
+            log0(f"resumed from update {successful_updates} "
+                 f"({latest_checkpoint(args.ckpt_dir)})")
+        else:
+            log0("no committed checkpoint found; starting from scratch")
     hist = []
     for step in range(args.updates):
         lr = lr_at(successful_updates, Sched)
@@ -341,6 +361,16 @@ def main():
         check_update_or_die(tot_loss, gnorm, dev, step=successful_updates)
         opt.step()
         successful_updates += 1
+
+        # Commit AFTER the optimizer step and the increment, so the stored
+        # cursor and the stored weights describe the same point in the run.
+        if args.save_every and successful_updates % args.save_every == 0:
+            t_c0 = time.time()
+            save_checkpoint(args.ckpt_dir, successful_updates, model, opt,
+                            extra={"seq_len": args.seq_len, "lr": lr})
+            sweep_stale(args.ckpt_dir, keep=args.keep_checkpoints)
+            log0(f"checkpoint committed at update {successful_updates} "
+                 f"in {time.time() - t_c0:.1f}s")
 
         dt = time.time() - t_start
         toks = G * args.seq_len
