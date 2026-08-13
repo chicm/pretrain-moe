@@ -354,6 +354,80 @@ class RFullGate2ConfigTests(unittest.TestCase):
         self.assertNotIn("pretrain_gpt.py", " ".join(command))
 
 
+class RFullProductionDataBlendTests(unittest.TestCase):
+    """The data source is a fail-closed choice between mock and a real blend."""
+
+    def _real_data_config(self) -> dict:
+        config = copy.deepcopy(load_config(MINI_CONFIG))
+        config["runtime"]["mock_data"] = False
+        config["data"] = {
+            "split": "990,9,1",
+            "blend": [
+                {"weight": 0.6, "prefix": "/shared/data/dclm_tok/part_00/shard_0000"},
+                {"weight": 0.4, "prefix": "/shared/data/math_tok/shard_0001"},
+            ],
+        }
+        return config
+
+    def test_mock_data_still_emits_mock_flags(self) -> None:
+        args = build_megatron_args(load_config(MINI_CONFIG), data_cache_path="/shared/cache")
+        self.assertIn("--mock-data", args)
+        self.assertNotIn("--data-path", args)
+        self.assertEqual(args[args.index("--split") + 1], "949,50,1")
+
+    def test_real_blend_emits_weighted_data_path(self) -> None:
+        args = build_megatron_args(self._real_data_config(), data_cache_path="/shared/cache")
+        self.assertNotIn("--mock-data", args)
+        self.assertEqual(args[args.index("--split") + 1], "990,9,1")
+        start = args.index("--data-path")
+        self.assertEqual(
+            args[start + 1 : start + 5],
+            [
+                "0.6",
+                "/shared/data/dclm_tok/part_00/shard_0000",
+                "0.4",
+                "/shared/data/math_tok/shard_0001",
+            ],
+        )
+
+    def test_mock_data_forbids_a_blend(self) -> None:
+        config = self._real_data_config()
+        config["runtime"]["mock_data"] = True
+        with self.assertRaises(ConfigError):
+            build_megatron_args(config, data_cache_path="/shared/cache")
+
+    def test_real_data_requires_a_blend(self) -> None:
+        config = copy.deepcopy(load_config(MINI_CONFIG))
+        config["runtime"]["mock_data"] = False
+        with self.assertRaises(ConfigError):
+            build_megatron_args(config, data_cache_path="/shared/cache")
+
+    def test_blend_entries_are_validated(self) -> None:
+        for bad in (
+            {"weight": 0.0, "prefix": "/shared/a"},
+            {"weight": -1.0, "prefix": "/shared/a"},
+            {"weight": 1.0, "prefix": "relative/path"},
+            {"weight": 1.0},
+            {"prefix": "/shared/a"},
+        ):
+            config = self._real_data_config()
+            config["data"]["blend"] = [bad]
+            with self.subTest(bad=bad), self.assertRaises(ConfigError):
+                build_megatron_args(config, data_cache_path="/shared/cache")
+
+    def test_empty_blend_is_rejected(self) -> None:
+        config = self._real_data_config()
+        config["data"]["blend"] = []
+        with self.assertRaises(ConfigError):
+            build_megatron_args(config, data_cache_path="/shared/cache")
+
+    def test_split_must_have_three_fields(self) -> None:
+        config = self._real_data_config()
+        config["data"]["split"] = "99,1"
+        with self.assertRaises(ConfigError):
+            build_megatron_args(config, data_cache_path="/shared/cache")
+
+
 class RFullGate3MultiNodeTests(unittest.TestCase):
     MINI_2NODE = ROOT / "configs" / "gate3" / "rfull_ep8_mini_2node.json"
     FULL_2NODE = ROOT / "configs" / "gate3" / "rfull_ep8_full_geometry_2node.json"

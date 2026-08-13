@@ -165,12 +165,41 @@ def validate_config(config: dict[str, Any]) -> None:
         "NVTE attention flags do not match unfused baseline",
     )
     for required_true in (
-        "mock_data",
         "distributed_optimizer",
         "overlap_grad_reduce",
         "overlap_param_gather",
     ):
         _require(runtime.get(required_true) is True, f"runtime.{required_true} must be true")
+
+    # Data source is a fail-closed choice: qualification runs use synthetic
+    # tokens, production runs must name a real corpus blend.  Exactly one of
+    # the two must be configured so a production launch can never silently
+    # fall back to mock data (and a smoke test can never silently read TBs).
+    data = config.get("data")
+    if runtime.get("mock_data") is True:
+        _require(data is None, "runtime.mock_data=true forbids a data blend")
+    else:
+        _require(
+            isinstance(data, dict),
+            "runtime.mock_data must be true, or config.data must define a real blend",
+        )
+        _require(
+            isinstance(data.get("blend"), list) and bool(data["blend"]),
+            "data.blend must be a non-empty list",
+        )
+        for entry in data["blend"]:
+            _require(
+                isinstance(entry, dict)
+                and isinstance(entry.get("weight"), (int, float))
+                and float(entry["weight"]) > 0
+                and isinstance(entry.get("prefix"), str)
+                and entry["prefix"].startswith("/"),
+                "each data.blend entry needs a positive weight and an absolute prefix",
+            )
+        _require(
+            isinstance(data.get("split"), str) and data["split"].count(",") == 2,
+            "data.split must be a 'train,valid,test' string",
+        )
 
 
 def build_megatron_args(
@@ -217,8 +246,6 @@ def build_megatron_args(
         "--tokenizer-type", "NullTokenizer",
         "--vocab-size", str(model["native_vocab_size"]),
         "--make-vocab-size-divisible-by", str(model["make_vocab_size_divisible_by"]),
-        "--split", "949,50,1",
-        "--mock-data",
         "--data-cache-path", data_cache_path,
         "--swiglu",
         "--disable-bias-linear",
@@ -269,6 +296,16 @@ def build_megatron_args(
         "--eval-iters", "1",
         "--ckpt-format", "torch_dist",
     ]
+    # Data source: mock tokens for qualification, or a real weighted blend.
+    # validate_config() has already proven exactly one of these is configured.
+    if runtime.get("mock_data") is True:
+        args.extend(["--split", "949,50,1", "--mock-data"])
+    else:
+        data = config["data"]
+        blend: list[str] = []
+        for entry in data["blend"]:
+            blend.extend([str(float(entry["weight"])), entry["prefix"]])
+        args.extend(["--split", data["split"], "--data-path", *blend])
     if save_dir:
         if not save_interval or save_interval <= 0:
             raise ConfigError("save_interval must be positive when save_dir is set")
