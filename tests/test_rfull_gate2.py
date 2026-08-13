@@ -354,6 +354,137 @@ class RFullGate2ConfigTests(unittest.TestCase):
         self.assertNotIn("pretrain_gpt.py", " ".join(command))
 
 
+class RFullGate3MultiNodeTests(unittest.TestCase):
+    MINI_2NODE = ROOT / "configs" / "gate3" / "rfull_ep8_mini_2node.json"
+    FULL_2NODE = ROOT / "configs" / "gate3" / "rfull_ep8_full_geometry_2node.json"
+
+    def _fixture_dirs(self, root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+        project = root / "project"
+        megatron = root / "Megatron-LM"
+        (project / "tools").mkdir(parents=True)
+        megatron.mkdir()
+        for path in (
+            project / "tools" / "rfull_rocm_entrypoint.py",
+            project / "tools" / "pretrain_rfull_moe.py",
+            megatron / "pretrain_gpt.py",
+        ):
+            path.write_text("# fixture\n", encoding="utf-8")
+        return project, megatron
+
+    def test_two_node_profiles_declare_world_16_with_ep8_and_edp2(self) -> None:
+        for path in (self.MINI_2NODE, self.FULL_2NODE):
+            config = load_config(path)
+            self.assertEqual(config["cluster"]["nnodes"], 2)
+            self.assertEqual(config["cluster"]["gpus_per_node"], 8)
+            world = config["cluster"]["nnodes"] * config["cluster"]["gpus_per_node"]
+            self.assertEqual(world, 16)
+            ep = config["parallel"]["expert_model_parallel_size"]
+            self.assertEqual(ep, 8)
+            # Expert-data parallel replicas = world / EP.
+            self.assertEqual(world // ep, 2)
+            self.assertEqual(config["training"]["global_batch_size"] % world, 0)
+            self.assertEqual(config["upstream"]["commit"], PINNED_MEGATRON_COMMIT)
+
+    def test_two_node_full_geometry_keeps_frozen_ledger(self) -> None:
+        full = load_config(self.FULL_2NODE)
+        self.assertEqual(full["model"]["expected_local_parameters"], 4_586_027_008)
+        self.assertEqual(full["model"]["num_layers"], 48)
+        self.assertEqual(full["model"]["moe_layer_frequency"], [0, 0] + [1] * 46)
+
+    def test_global_batch_must_divide_world_size(self) -> None:
+        config = copy.deepcopy(load_config(self.MINI_2NODE))
+        config["training"]["global_batch_size"] = 12
+        with self.assertRaisesRegex(ConfigError, "divisible"):
+            validate_config(config)
+
+    def test_expert_parallel_group_must_fit_inside_one_node(self) -> None:
+        config = copy.deepcopy(load_config(self.MINI_2NODE))
+        config["parallel"]["expert_model_parallel_size"] = 16
+        with self.assertRaises(ConfigError):
+            validate_config(config)
+
+    def test_node_count_must_be_positive_int(self) -> None:
+        config = copy.deepcopy(load_config(self.MINI_2NODE))
+        config["cluster"]["nnodes"] = 0
+        with self.assertRaisesRegex(ConfigError, "positive int"):
+            validate_config(config)
+
+    def test_torchrun_command_carries_node_rank_and_nnodes(self) -> None:
+        config = load_config(self.MINI_2NODE)
+        with tempfile.TemporaryDirectory() as temporary:
+            project, megatron = self._fixture_dirs(pathlib.Path(temporary))
+            for node_rank in (0, 1):
+                command = build_torchrun_command(
+                    config,
+                    python="/opt/venv/bin/python",
+                    project_dir=str(project),
+                    megatron_dir=str(megatron),
+                    master_addr="100.64.142.47",
+                    master_port=29710,
+                    data_cache_path="/shared/cache",
+                    node_rank=node_rank,
+                )
+                self.assertEqual(command[command.index("--nnodes") + 1], "2")
+                self.assertEqual(command[command.index("--node-rank") + 1], str(node_rank))
+                self.assertEqual(command[command.index("--nproc-per-node") + 1], "8")
+                self.assertEqual(
+                    command[command.index("--master-addr") + 1], "100.64.142.47"
+                )
+
+    def test_torchrun_rejects_out_of_range_node_rank(self) -> None:
+        config = load_config(self.MINI_2NODE)
+        with tempfile.TemporaryDirectory() as temporary:
+            project, megatron = self._fixture_dirs(pathlib.Path(temporary))
+            for bad_rank in (-1, 2, 99):
+                with self.assertRaisesRegex(ConfigError, "outside"):
+                    build_torchrun_command(
+                        config,
+                        python="/opt/venv/bin/python",
+                        project_dir=str(project),
+                        megatron_dir=str(megatron),
+                        master_addr="100.64.142.47",
+                        master_port=29710,
+                        data_cache_path="/shared/cache",
+                        node_rank=bad_rank,
+                    )
+
+    def test_torchrun_rejects_loopback_master_for_multi_node(self) -> None:
+        config = load_config(self.MINI_2NODE)
+        with tempfile.TemporaryDirectory() as temporary:
+            project, megatron = self._fixture_dirs(pathlib.Path(temporary))
+            for loopback in ("127.0.0.1", "localhost"):
+                with self.assertRaisesRegex(ConfigError, "routable"):
+                    build_torchrun_command(
+                        config,
+                        python="/opt/venv/bin/python",
+                        project_dir=str(project),
+                        megatron_dir=str(megatron),
+                        master_addr=loopback,
+                        master_port=29710,
+                        data_cache_path="/shared/cache",
+                        node_rank=0,
+                    )
+
+    def test_single_node_gate2_profiles_remain_valid(self) -> None:
+        # Gate 3 generalisation must not regress the sealed Gate 2 contract.
+        for path in (MINI_CONFIG, FULL_CONFIG):
+            config = load_config(path)
+            self.assertEqual(config["cluster"]["nnodes"], 1)
+        with tempfile.TemporaryDirectory() as temporary:
+            project, megatron = self._fixture_dirs(pathlib.Path(temporary))
+            command = build_torchrun_command(
+                load_config(MINI_CONFIG),
+                python="/opt/venv/bin/python",
+                project_dir=str(project),
+                megatron_dir=str(megatron),
+                master_addr="127.0.0.1",
+                master_port=29710,
+                data_cache_path="/shared/cache",
+            )
+            self.assertEqual(command[command.index("--nnodes") + 1], "1")
+            self.assertEqual(command[command.index("--node-rank") + 1], "0")
+
+
 class RFullCheckpointCompatibilityTests(unittest.TestCase):
     @staticmethod
     def _product(values: tuple[int, ...]) -> int:

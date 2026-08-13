@@ -3,6 +3,7 @@ set -euo pipefail
 
 if [[ $# -lt 6 ]]; then
   echo "usage: $0 CONFIG RUN_DIR PROJECT_DIR MEGATRON_DIR MASTER_PORT DATA_CACHE_PATH [launch-node options...]" >&2
+  echo "  multi-node: export RFULL_MASTER_ADDR=<routable host> RFULL_NODE_RANK=<n>" >&2
   exit 2
 fi
 
@@ -14,6 +15,17 @@ MASTER_PORT=$5
 DATA_CACHE_PATH=$6
 shift 6
 PYTHON=${RFULL_PYTHON:-/opt/venv/bin/python}
+MASTER_ADDR=${RFULL_MASTER_ADDR:-127.0.0.1}
+NODE_RANK=${RFULL_NODE_RANK:-0}
+
+if ! [[ "$NODE_RANK" =~ ^[0-9]+$ ]]; then
+  echo "RFULL_NODE_RANK must be a non-negative integer, got: $NODE_RANK" >&2
+  exit 10
+fi
+if [[ "$NODE_RANK" != "0" && "$MASTER_ADDR" == "127.0.0.1" ]]; then
+  echo "REFUSE_LOOPBACK_MASTER: node rank $NODE_RANK cannot reach 127.0.0.1" >&2
+  exit 11
+fi
 
 if [[ "${TORCH_DISTRIBUTED_DEBUG:-}" =~ ^[Dd][Ee][Tt][Aa][Ii][Ll]$ ]]; then
   echo "REFUSE_TORCH_DISTRIBUTED_DEBUG_DETAIL: incompatible with the qualified distributed-optimizer path" >&2
@@ -47,7 +59,7 @@ if ! "$PYTHON" -c 'from rfull_moe.pinned_mcore import verify_pinned_mcore_source
 fi
 GPU_COUNT=$($PYTHON -c 'import torch; print(torch.cuda.device_count())')
 if [[ "$GPU_COUNT" != "8" ]]; then
-  echo "Gate 2 requires exactly 8 visible GPUs, observed $GPU_COUNT" >&2
+  echo "R-Full requires exactly 8 visible GPUs per node, observed $GPU_COUNT" >&2
   exit 7
 fi
 
@@ -94,7 +106,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-echo "RFULL_NODE_START=$(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(hostname) run_dir=$RUN_DIR" | tee "$LOG"
+echo "RFULL_NODE_START=$(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(hostname) run_dir=$RUN_DIR node_rank=$NODE_RANK master_addr=$MASTER_ADDR" | tee "$LOG"
 printf 'RFULL_CONFIG_SHA256=' | tee -a "$LOG"
 sha256sum "$CONFIG" | tee -a "$LOG"
 
@@ -103,15 +115,16 @@ set +e
   --config "$CONFIG" \
   --project-dir "$PROJECT_DIR" \
   --megatron-dir "$MEGATRON_DIR" \
-  --master-addr 127.0.0.1 \
+  --master-addr "$MASTER_ADDR" \
   --master-port "$MASTER_PORT" \
+  --node-rank "$NODE_RANK" \
   --data-cache-path "$DATA_CACHE_PATH" \
   --python "$PYTHON" \
   "$@" 2>&1 | tee -a "$LOG"
 PIPE_RC=${PIPESTATUS[0]}
 set -e
 
-echo "RFULL_NODE_COMPLETE=$(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(hostname) rc=$PIPE_RC" | tee -a "$LOG"
+echo "RFULL_NODE_COMPLETE=$(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(hostname) node_rank=$NODE_RANK rc=$PIPE_RC" | tee -a "$LOG"
 if [[ $PIPE_RC -ne 0 ]]; then
   exit "$PIPE_RC"
 fi

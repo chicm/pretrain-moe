@@ -350,7 +350,33 @@ def _verify_checkpoint(
     }
 
 
-def _verify_telemetry(run_dir: pathlib.Path) -> dict[str, Any]:
+NODE_START_RE = re.compile(r"RFULL_NODE_START=(\S+)\s+host=(\S+)\s+run_dir=(\S+)(?:\s+node_rank=(\d+))?")
+
+
+def _node_rank_from_log(text: str, *, nnodes: int) -> int:
+    match = NODE_START_RE.search(text)
+    if match is None:
+        raise AssertionError("training log does not declare RFULL_NODE_START")
+    raw = match.group(4)
+    if raw is None:
+        # Sealed single-node Gate 2 evidence predates the node_rank field. Only a
+        # single-node contract may infer rank 0; multi-node must be explicit.
+        if nnodes != 1:
+            raise AssertionError(
+                "multi-node log must declare RFULL_NODE_START node_rank explicitly"
+            )
+        return 0
+    return int(raw)
+
+
+def _node_host_from_log(text: str) -> str:
+    match = NODE_START_RE.search(text)
+    if match is None:
+        raise AssertionError("training log does not declare RFULL_NODE_START host")
+    return match.group(2)
+
+
+def _verify_telemetry(run_dir: pathlib.Path, *, expected_active: int = 8) -> dict[str, Any]:
     status_path = run_dir / "gpu.telemetry.status.log"
     csv_path = run_dir / "gpu.telemetry.csv"
     if not status_path.is_file() or not csv_path.is_file():
@@ -388,8 +414,10 @@ def _verify_telemetry(run_dir: pathlib.Path) -> dict[str, Any]:
         if float(values["max_gpu_use_percent"]) > 0.0
         and float(values["max_vram_percent"]) > 0.0
     )
-    if len(active) != 8:
-        raise AssertionError(f"telemetry showed active GPUs={active}, expected 8: {maxima}")
+    if len(active) != expected_active:
+        raise AssertionError(
+            f"telemetry showed active GPUs={active}, expected {expected_active}: {maxima}"
+        )
     return {"active_devices": active, "devices": maxima}
 
 
@@ -397,6 +425,7 @@ def verify(
     run_dir: pathlib.Path,
     config_path: pathlib.Path,
     *,
+    additional_node_run_dirs: list[pathlib.Path] | None = None,
     expected_final_iteration: int | None = None,
     expected_first_iteration: int = 1,
     expect_training_complete: bool = True,
@@ -416,12 +445,43 @@ def verify(
 ) -> dict[str, Any]:
     config = load_config(config_path)
     expected_final = expected_final_iteration or config["training"]["train_iters"]
+    nnodes = config["cluster"]["nnodes"]
+    gpus_per_node = config["cluster"]["gpus_per_node"]
+    world_size = nnodes * gpus_per_node
+    node_run_dirs = [run_dir] + list(additional_node_run_dirs or [])
+    if len(node_run_dirs) != nnodes:
+        raise AssertionError(
+            f"config declares {nnodes} nodes but {len(node_run_dirs)} run dirs were supplied"
+        )
+    if len({d.resolve() for d in node_run_dirs}) != nnodes:
+        raise AssertionError("node run dirs must be distinct paths")
+
+    node_logs: list[str] = []
+    node_reports: list[dict[str, Any]] = []
+    for index, node_dir in enumerate(node_run_dirs):
+        node_log_path = node_dir / "train.console.log"
+        if not node_log_path.is_file():
+            raise AssertionError(f"missing training log for node {index}: {node_log_path}")
+        node_text = node_log_path.read_text(encoding="utf-8", errors="replace")
+        if "RFULL_NODE_COMPLETE=" not in node_text or " rc=0" not in node_text:
+            raise AssertionError(f"node {index} did not record a clean rc=0 completion")
+        observed_rank = _node_rank_from_log(node_text, nnodes=nnodes)
+        if observed_rank != index:
+            raise AssertionError(
+                f"run dir {node_dir} reports node_rank={observed_rank}, expected {index}"
+            )
+        node_logs.append(node_text)
+        node_reports.append(
+            {
+                "node_rank": index,
+                "run_dir": str(node_dir),
+                "host": _node_host_from_log(node_text),
+                "telemetry": _verify_telemetry(node_dir, expected_active=gpus_per_node),
+            }
+        )
+    # Rank markers are global, so the union of node logs is the authoritative stream.
+    text = "\n".join(node_logs)
     log_path = run_dir / "train.console.log"
-    if not log_path.is_file():
-        raise AssertionError(f"missing training log: {log_path}")
-    text = log_path.read_text(encoding="utf-8", errors="replace")
-    if "RFULL_NODE_COMPLETE=" not in text or " rc=0" not in text:
-        raise AssertionError("node launcher did not record a clean rc=0 completion")
 
     fatal_hits: dict[str, list[str]] = {}
     for name, pattern in FATAL_PATTERNS.items():
@@ -455,7 +515,7 @@ def verify(
         )
 
     markers = _json_markers(text)
-    expected_ranks = list(range(8))
+    expected_ranks = list(range(world_size))
     required_rank_markers = [
         "EARLY_DEVICE_BIND",
         "PROCESS_GROUP_DEVICE_BIND",
@@ -584,7 +644,7 @@ def verify(
             value = item.get(metric_name)
             if not isinstance(value, (float, int)) or not math.isfinite(float(value)):
                 raise AssertionError(f"non-finite {metric_name}: {item}")
-            if item.get("ep_world_size") != 8:
+            if item.get("ep_world_size") != config["parallel"]["expert_model_parallel_size"]:
                 raise AssertionError(f"EP-global tracker world size drift: {item}")
             if item.get("tracker_group") != "expert_parallel_avg":
                 raise AssertionError(f"tracker is not using EP avg metadata: {item}")
@@ -625,7 +685,7 @@ def verify(
     if require_batch_fingerprints:
         batch_fingerprints = markers.get("RFULL_BATCH_FINGERPRINT", [])
         parallel = config["parallel"]
-        dense_data_parallel_size = 8 // (
+        dense_data_parallel_size = world_size // (
             parallel["tensor_model_parallel_size"]
             * parallel["pipeline_model_parallel_size"]
             * parallel["context_parallel_size"]
@@ -701,7 +761,7 @@ def verify(
     if "aiter rope backend is enabled, which has lower precision" in text.lower():
         raise AssertionError("lower-precision AIter RoPE backend was enabled")
 
-    telemetry = _verify_telemetry(run_dir)
+    telemetry = node_reports[0]["telemetry"]
     checkpoint = None
     checkpoint_arguments = (
         checkpoint_dir,
@@ -722,7 +782,7 @@ def verify(
             checkpoint_dir,
             checkpoint_manifest,
             expected_checkpoint_iteration,
-            expected_world_size=8,
+            expected_world_size=world_size,
             require_mcore_data=require_checkpoint_mcore_data,
         )
 
@@ -731,7 +791,10 @@ def verify(
         "status": "PASS",
         "profile": config["name"],
         "upstream_commit": config["upstream"]["commit"],
-        "world_size": 8,
+        "world_size": world_size,
+        "nnodes": nnodes,
+        "gpus_per_node": gpus_per_node,
+        "nodes": node_reports,
         "marker_ranks": marker_ranks,
         "zero_token_expert_ranks": zero_token_expert_ranks,
         "expected_local_parameters": expected_local_parameters,
@@ -774,6 +837,12 @@ def _sha256(path: pathlib.Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", required=True)
+    parser.add_argument(
+        "--additional-node-run-dir",
+        action="append",
+        default=[],
+        help="run dir for node ranks 1..N-1, in ascending node-rank order",
+    )
     parser.add_argument("--config", required=True)
     parser.add_argument("--expected-final-iteration", type=int)
     parser.add_argument("--expected-first-iteration", type=int, default=1)
@@ -798,6 +867,7 @@ def main() -> int:
     summary = verify(
         run_dir,
         config_path,
+        additional_node_run_dirs=[pathlib.Path(p) for p in args.additional_node_run_dir],
         expected_final_iteration=args.expected_final_iteration,
         expected_first_iteration=args.expected_first_iteration,
         expect_training_complete=not args.expect_no_training_complete,

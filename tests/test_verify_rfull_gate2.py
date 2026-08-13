@@ -18,7 +18,164 @@ from tools.verify_rfull_gate2 import (
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MINI_CONFIG = ROOT / "configs" / "gate2" / "rfull_ep8_mini.json"
+MINI_2NODE_CONFIG = ROOT / "configs" / "gate3" / "rfull_ep8_mini_2node.json"
 COMMIT = "5cb6dbb3ed04e6fa11a862d90fe898ac2d3ddfad"
+
+
+def _node_evidence(
+    run_dir: pathlib.Path,
+    *,
+    node_rank: int,
+    ranks: range,
+    world_size: int,
+    train_iters: int = 4,
+) -> None:
+    """Write one node's share of a synthetic multi-node run."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    records: list[dict] = []
+    for rank in ranks:
+        for marker in (
+            "EARLY_DEVICE_BIND",
+            "PROCESS_GROUP_DEVICE_BIND",
+            "ROCM_LEGACY_FUSED_KERNEL_LOADER_SKIPPED",
+        ):
+            records.append({"marker": marker, "rank": rank})
+        records.extend(
+            [
+                {
+                    "marker": "RFULL_MODEL_BUILT",
+                    "rank": rank,
+                    "local_parameters": 19_371_008,
+                    "trainable_parameters": 19_371_008,
+                    "source_guard_file_count": 12,
+                    "source_guard_megatron_commit": COMMIT,
+                },
+                {
+                    "marker": "RFULL_GROUPED_GEMM_FORWARD",
+                    "rank": rank,
+                    "num_local_experts": 12,
+                    "assigned_tokens": 48,
+                    "zero_token_experts": 1 if rank == 0 else 0,
+                    "hidden_size": 512,
+                },
+                {
+                    "marker": "RFULL_EP_GLOBAL_AUX_LOSS",
+                    "rank": rank,
+                    "raw_aux_loss": 1.2,
+                    "ep_world_size": 8,
+                    "tracker_group": "expert_parallel_avg",
+                },
+                {
+                    "marker": "RFULL_EP_GLOBAL_Z_LOSS",
+                    "rank": rank,
+                    "raw_z_loss": 3.4,
+                    "ep_world_size": 8,
+                    "tracker_group": "expert_parallel_avg",
+                },
+                {
+                    "marker": "RFULL_TRAINING_COMPLETE",
+                    "rank": rank,
+                    "iteration": train_iters,
+                    "consumed_train_samples": 64,
+                    "consumed_train_tokens": 512,
+                },
+            ]
+        )
+    lines = [f"RFULL_NODE_START=now host=node-{node_rank} run_dir=/run node_rank={node_rank}"]
+    lines.append("".join(json.dumps(record) for record in records))
+    lines.extend(
+        (
+            f"iteration {iteration} / {train_iters} | lm loss: {9.0 - iteration:.6E} | "
+            "number of skipped iterations: 0 | number of nan iterations: 0"
+        )
+        for iteration in range(1, train_iters + 1)
+    )
+    lines.extend(
+        [
+            "  attention_backend ............................... AttnBackend.unfused",
+            f"RFULL_NODE_COMPLETE=now host=node-{node_rank} node_rank={node_rank} rc=0",
+        ]
+    )
+    (run_dir / "train.console.log").write_text("\n".join(lines), encoding="utf-8")
+    (run_dir / "gpu.telemetry.status.log").write_text(
+        f"GPU_TELEMETRY_START,now,node-{node_rank}\n"
+        f"GPU_TELEMETRY_COMPLETE,now,node-{node_rank},rc=0\n",
+        encoding="utf-8",
+    )
+    telemetry = ["device,GPU use (%),GPU Memory Allocated (VRAM%)"]
+    telemetry.extend(f"card{index},90,4" for index in range(8))
+    (run_dir / "gpu.telemetry.csv").write_text("\n".join(telemetry) + "\n", encoding="utf-8")
+
+
+class VerifyRFullGate3MultiNodeTests(unittest.TestCase):
+    def _two_node_run(self, root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+        node0 = root / "node-0"
+        node1 = root / "node-1"
+        _node_evidence(node0, node_rank=0, ranks=range(0, 8), world_size=16)
+        _node_evidence(node1, node_rank=1, ranks=range(8, 16), world_size=16)
+        return node0, node1
+
+    def test_two_node_run_passes_with_all_16_ranks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            node0, node1 = self._two_node_run(pathlib.Path(temporary))
+            summary = verify(node0, MINI_2NODE_CONFIG, additional_node_run_dirs=[node1])
+            self.assertEqual(summary["status"], "PASS")
+            self.assertEqual(summary["world_size"], 16)
+            self.assertEqual(summary["nnodes"], 2)
+            self.assertEqual(len(summary["nodes"]), 2)
+            self.assertEqual(
+                [node["node_rank"] for node in summary["nodes"]], [0, 1]
+            )
+            self.assertEqual(
+                [node["host"] for node in summary["nodes"]], ["node-0", "node-1"]
+            )
+
+    def test_missing_second_node_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            node0, _ = self._two_node_run(pathlib.Path(temporary))
+            with self.assertRaisesRegex(AssertionError, "2 nodes but 1 run dirs"):
+                verify(node0, MINI_2NODE_CONFIG)
+
+    def test_missing_ranks_on_second_node_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            node0, node1 = self._two_node_run(root)
+            # Drop rank 15 evidence from node 1.
+            log = node1 / "train.console.log"
+            text = log.read_text(encoding="utf-8")
+            text = text.replace('{"marker": "RFULL_MODEL_BUILT", "rank": 15', '{"marker": "X", "rank": 15')
+            log.write_text(text, encoding="utf-8")
+            with self.assertRaises(AssertionError):
+                verify(node0, MINI_2NODE_CONFIG, additional_node_run_dirs=[node1])
+
+    def test_duplicate_node_run_dirs_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            node0, _ = self._two_node_run(pathlib.Path(temporary))
+            with self.assertRaisesRegex(AssertionError, "distinct"):
+                verify(node0, MINI_2NODE_CONFIG, additional_node_run_dirs=[node0])
+
+    def test_node_dirs_supplied_out_of_order_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            node0, node1 = self._two_node_run(pathlib.Path(temporary))
+            with self.assertRaisesRegex(AssertionError, "node_rank=1, expected 0"):
+                verify(node1, MINI_2NODE_CONFIG, additional_node_run_dirs=[node0])
+
+    def test_node_failure_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            node0, node1 = self._two_node_run(pathlib.Path(temporary))
+            log = node1 / "train.console.log"
+            log.write_text(
+                log.read_text(encoding="utf-8").replace("rc=0", "rc=1"), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(AssertionError, "node 1 did not record a clean"):
+                verify(node0, MINI_2NODE_CONFIG, additional_node_run_dirs=[node1])
+
+    def test_second_node_must_have_its_own_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            node0, node1 = self._two_node_run(pathlib.Path(temporary))
+            (node1 / "gpu.telemetry.csv").unlink()
+            with self.assertRaises(AssertionError):
+                verify(node0, MINI_2NODE_CONFIG, additional_node_run_dirs=[node1])
 
 
 class VerifyRFullGate2Tests(unittest.TestCase):
@@ -216,7 +373,8 @@ class VerifyRFullGate2Tests(unittest.TestCase):
                             "sha256": f"{1000 + rank * 2 + microbatch:064x}",
                         }
                     )
-            lines = ["".join(json.dumps(record) for record in records)]
+            lines = ["RFULL_NODE_START=now host=test run_dir=/run node_rank=0"]
+            lines.append("".join(json.dumps(record) for record in records))
             lines.extend(
                 (
                     f"iteration {iteration} / 4 | lm loss: {9.0 - iteration:.6E} | "
@@ -258,7 +416,8 @@ class VerifyRFullGate2Tests(unittest.TestCase):
                 for record in records
                 if record["marker"] != "RFULL_TRAINING_COMPLETE"
             ]
-            phase_lines = ["".join(json.dumps(record) for record in phase_records)]
+            phase_lines = ["RFULL_NODE_START=now host=test run_dir=/run node_rank=0"]
+            phase_lines.append("".join(json.dumps(record) for record in phase_records))
             phase_lines.extend(lines[-6:-4])
             phase_lines.extend(lines[-2:])
             (run_dir / "train.console.log").write_text(

@@ -116,7 +116,18 @@ def validate_config(config: dict[str, Any]) -> None:
 
     cluster = config.get("cluster", {})
     parallel = config.get("parallel", {})
-    _require(cluster == {"nnodes": 1, "gpus_per_node": 8}, "Gate 2 is exactly one 8-GPU node")
+    _require(
+        set(cluster) == {"nnodes", "gpus_per_node"},
+        "cluster must declare exactly nnodes and gpus_per_node",
+    )
+    nnodes = cluster.get("nnodes")
+    gpus_per_node = cluster.get("gpus_per_node")
+    _require(isinstance(nnodes, int) and nnodes >= 1, "cluster.nnodes must be a positive int")
+    _require(gpus_per_node == 8, "each node contributes exactly 8 GPUs")
+    world_size = nnodes * gpus_per_node
+
+    # EP is confined inside a node so that all-to-all stays on the intra-node
+    # fabric; the remaining data parallelism (EDP) spans nodes.
     expected_parallel = {
         "tensor_model_parallel_size": 1,
         "pipeline_model_parallel_size": 1,
@@ -124,12 +135,23 @@ def validate_config(config: dict[str, Any]) -> None:
         "expert_model_parallel_size": 8,
         "expert_tensor_parallel_size": 1,
     }
-    _require(parallel == expected_parallel, "Gate 2 topology must be TP1/PP1/CP1/EP8/ETP1")
+    _require(parallel == expected_parallel, "R-Full topology must be TP1/PP1/CP1/EP8/ETP1")
+    _require(
+        world_size % parallel["expert_model_parallel_size"] == 0,
+        "world size must be divisible by expert_model_parallel_size",
+    )
+    _require(
+        parallel["expert_model_parallel_size"] <= gpus_per_node,
+        "expert parallel group must fit inside a single node",
+    )
 
     training = config.get("training", {})
     for key in ("micro_batch_size", "global_batch_size", "train_iters"):
         _require(isinstance(training.get(key), int) and training[key] > 0, f"invalid training.{key}")
-    _require(training["global_batch_size"] % 8 == 0, "global batch must be divisible by DP=8")
+    _require(
+        training["global_batch_size"] % world_size == 0,
+        "global batch must be divisible by the dense data-parallel size",
+    )
 
     runtime = config.get("runtime", {})
     _require(runtime.get("attention_backend") == "unfused", "Gate 2 baseline must use unfused attention")
@@ -271,6 +293,7 @@ def build_torchrun_command(
     master_addr: str,
     master_port: int,
     data_cache_path: str,
+    node_rank: int = 0,
     train_iters: int | None = None,
     save_dir: str | None = None,
     load_dir: str | None = None,
@@ -285,12 +308,17 @@ def build_torchrun_command(
         raise ConfigError("deployed R-Full entry points are missing")
     if not (megatron / "pretrain_gpt.py").is_file():
         raise ConfigError("pinned Megatron entry point is missing")
+    nnodes = config["cluster"]["nnodes"]
+    if not 0 <= node_rank < nnodes:
+        raise ConfigError(f"node_rank {node_rank} outside [0, {nnodes})")
+    if nnodes > 1 and master_addr in ("127.0.0.1", "localhost"):
+        raise ConfigError("multi-node launch requires a routable master address")
     return [
         python,
         "-m", "torch.distributed.run",
-        "--nnodes", "1",
+        "--nnodes", str(nnodes),
         "--nproc-per-node", "8",
-        "--node-rank", "0",
+        "--node-rank", str(node_rank),
         "--master-addr", master_addr,
         "--master-port", str(master_port),
         str(compatibility_entrypoint),
@@ -324,6 +352,7 @@ def main() -> int:
     launch_parser.add_argument("--master-port", required=True, type=int)
     launch_parser.add_argument("--data-cache-path", required=True)
     launch_parser.add_argument("--python", default=sys.executable)
+    launch_parser.add_argument("--node-rank", type=int, default=0)
     launch_parser.add_argument("--train-iters", type=int)
     launch_parser.add_argument("--save-dir")
     launch_parser.add_argument("--load-dir")
@@ -359,6 +388,7 @@ def main() -> int:
         master_addr=args.master_addr,
         master_port=args.master_port,
         data_cache_path=args.data_cache_path,
+        node_rank=args.node_rank,
         train_iters=args.train_iters,
         save_dir=args.save_dir,
         load_dir=args.load_dir,
