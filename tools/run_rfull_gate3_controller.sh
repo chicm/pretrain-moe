@@ -100,16 +100,18 @@ for index in "${!HOST_ARRAY[@]}"; do
 done
 rm -f "$PROBE"
 
-# The deployment must be byte-identical on every node.
-DEPLOY_SHA_LOCAL=$(cd "$PROJECT_DIR" && find tools rfull_moe configs -type f -print0 \
-  | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+# The deployment must be byte-identical on every node. Hash source files only:
+# __pycache__ is interpreter-generated at runtime and legitimately differs
+# between nodes (it is not part of the deployment contract).
+tree_hash_cmd="find tools rfull_moe configs -type f -not -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print \$1}'"
+DEPLOY_SHA_LOCAL=$(cd "$PROJECT_DIR" && eval "$tree_hash_cmd")
 for index in "${!HOST_ARRAY[@]}"; do
   host=${HOST_ARRAY[$index]}
   if (( index == 0 )); then
     observed=$DEPLOY_SHA_LOCAL
   else
     observed=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=20 "$host" \
-      "cd '$PROJECT_DIR' && find tools rfull_moe configs -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print \$1}'" || true)
+      "cd '$PROJECT_DIR' && $tree_hash_cmd" || true)
   fi
   if [[ "$observed" != "$DEPLOY_SHA_LOCAL" ]]; then
     printf '{"marker":"DEPLOYMENT_MISMATCH","host":"%s","node_rank":%s,"expected":"%s","observed":"%s"}\n' \
