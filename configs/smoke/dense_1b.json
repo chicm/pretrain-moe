@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "name": "dense-1b-multinode",
+  "description": "Stock Megatron-LM dense GPT smoke test for the multi-node ROCm baseline.",
+  "upstream": {
+    "repository": "https://github.com/NVIDIA/Megatron-LM.git",
+    "commit": "5cb6dbb3ed04e6fa11a862d90fe898ac2d3ddfad"
+  },
+  "cluster": {
+    "nnodes": 2,
+    "gpus_per_node": 8
+  },
+  "model": {
+    "num_layers": 18,
+    "hidden_size": 2048,
+    "ffn_hidden_size": 5504,
+    "num_attention_heads": 16,
+    "num_query_groups": 16,
+    "sequence_length": 1024,
+    "max_position_embeddings": 1024,
+    "vocab_size": 32768,
+    "normalization": "RMSNorm",
+    "position_embedding_type": "rope",
+    "rotary_base": 10000,
+    "swiglu": true,
+    "linear_bias": false,
+    "tie_embeddings": true
+  },
+  "parallel": {
+    "tensor_model_parallel_size": 2,
+    "pipeline_model_parallel_size": 1,
+    "context_parallel_size": 1
+  },
+  "training": {
+    "micro_batch_size": 1,
+    "global_batch_size": 16,
+    "train_iters": 8,
+    "learning_rate": 0.0002,
+    "min_learning_rate": 0.00002,
+    "weight_decay": 0.1,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.95,
+    "clip_grad": 1.0,
+    "seed": 1234,
+    "bf16": true
+  },
+  "runtime": {
+    "transformer_impl": "transformer_engine",
+    "attention_backend": "unfused",
+    "te_fused_attention": false,
+    "te_flash_attention": false,
+    "te_unfused_attention": true,
+    "distributed_optimizer": true,
+    "sequence_parallel": true,
+    "overlap_grad_reduce": true,
+    "overlap_param_gather": true,
+    "mock_data": true,
+    "log_interval": 1
+  }
+}
