@@ -26,7 +26,7 @@ def collect(root: pathlib.Path) -> list[pathlib.Path]:
         base = root / d
         if not base.exists():
             continue
-        for p in sorted(base.rglob("*")):
+        for p in base.rglob("*"):
             if not p.is_file():
                 continue
             if any(part in EXCLUDE_PARTS for part in p.parts):
@@ -34,7 +34,9 @@ def collect(root: pathlib.Path) -> list[pathlib.Path]:
             if p.suffix not in INCLUDE_SUFFIXES:
                 continue
             out.append(p)
-    return out
+    # Canonical global order by relative path, so an independent verifier can
+    # reproduce the tree hash without knowing INCLUDE_DIRS or its order.
+    return sorted(out, key=lambda p: p.relative_to(root).as_posix())
 
 
 def main() -> int:
