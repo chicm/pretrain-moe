@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local scratch/diagnostic scripts (never committed)
+/_*.sh
+/_*.py
