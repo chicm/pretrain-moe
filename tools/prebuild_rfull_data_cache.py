@@ -69,7 +69,14 @@ def build(
         raise SystemExit("config data.split must be 'train,valid,test'")
 
     model = config["model"]
-    seq_length = int(model["seq_length"])
+    # Production configs use `sequence_length`; some qualification configs use
+    # the shorter `seq_length`.  Accept either, fail closed if neither.
+    if "sequence_length" in model:
+        seq_length = int(model["sequence_length"])
+    elif "seq_length" in model:
+        seq_length = int(model["seq_length"])
+    else:
+        raise SystemExit("config model has neither sequence_length nor seq_length")
     seed = int(runtime.get("seed", config.get("seed", 1234)))
 
     train_s, valid_s, test_s = _sample_counts(config)
@@ -110,7 +117,6 @@ def build(
             self.eod = eod
 
     eod = int(config["model"].get("eot_token_id", 151643))
-
     ds_config = GPTDatasetConfig(
         random_seed=seed,
         sequence_length=seq_length,

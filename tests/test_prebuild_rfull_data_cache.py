@@ -82,6 +82,28 @@ class GuardTests(unittest.TestCase):
                 build(path, pathlib.Path(tmp) / "cache",
                       upstream_root=pathlib.Path(tmp), dry_run=True)
 
+    def test_production_key_sequence_length_is_accepted(self) -> None:
+        # Production configs spell it `sequence_length`; qualification configs
+        # sometimes use `seq_length`.  Both must work.
+        config = _config()
+        config["model"] = {"sequence_length": 4096, "eot_token_id": 151643}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "c.json"
+            path.write_text(json.dumps(config))
+            plan = build(path, pathlib.Path(tmp) / "cache",
+                         upstream_root=pathlib.Path(tmp), dry_run=True)
+        self.assertEqual(plan["seq_length"], 4096)
+
+    def test_missing_sequence_length_fails_closed(self) -> None:
+        config = _config()
+        config["model"] = {"eot_token_id": 151643}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "c.json"
+            path.write_text(json.dumps(config))
+            with self.assertRaises(SystemExit):
+                build(path, pathlib.Path(tmp) / "cache",
+                      upstream_root=pathlib.Path(tmp), dry_run=True)
+
     def test_dry_run_reports_the_plan_without_touching_megatron(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "c.json"
