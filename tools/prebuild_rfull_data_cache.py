@@ -52,6 +52,7 @@ def build(
     *,
     upstream_root: pathlib.Path,
     dry_run: bool,
+    builder_threads: int = 1,
 ) -> dict[str, object]:
     config = _load_config(config_path)
 
@@ -89,6 +90,7 @@ def build(
         "seq_length": seq_length,
         "seed": seed,
         "samples": {"train": train_s, "valid": valid_s, "test": test_s},
+        "builder_threads": int(builder_threads),
     }
     if dry_run:
         plan["dry_run"] = True
@@ -123,7 +125,7 @@ def build(
         blend=get_blend_from_list(interleaved),
         blend_per_split=None,
         split=split,
-        num_dataset_builder_threads=1,
+        num_dataset_builder_threads=int(builder_threads),
         path_to_cache=str(cache_path),
         mmap_bin_files=True,
         tokenizer=_NullTokenizer(eod),
@@ -160,6 +162,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", required=True, type=pathlib.Path)
     parser.add_argument("--cache-path", required=True, type=pathlib.Path)
     parser.add_argument("--upstream-root", required=True, type=pathlib.Path)
+    parser.add_argument(
+        "--builder-threads",
+        type=int,
+        default=1,
+        help="MCore num_dataset_builder_threads; >1 parallelises index construction",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -168,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         args.cache_path,
         upstream_root=args.upstream_root,
         dry_run=args.dry_run,
+        builder_threads=args.builder_threads,
     )
     print(json.dumps(report, indent=2))
     print("PREBUILD_RESULT=PASS")
