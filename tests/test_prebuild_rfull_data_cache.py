@@ -116,5 +116,42 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(plan["samples"]["train"], 1000 * 960)
 
 
+
+class HelperOverlayTest(unittest.TestCase):
+    """The compiled helpers_cpp overlay must be installed before building.
+
+    Without it the pre-build scans the entire 487-shard corpus (~90 min over
+    blobfuse) and only then dies with ModuleNotFoundError.  The failure is
+    expensive precisely because it surfaces so late, so assert on the source
+    that the overlay installer is invoked before any dataset import.
+    """
+
+    def _source(self) -> str:
+        root = pathlib.Path(__file__).resolve().parents[1]
+        return (root / "tools" / "prebuild_rfull_data_cache.py").read_text()
+
+    def test_overlay_installer_is_invoked(self) -> None:
+        self.assertIn("_install_writable_dataset_helper", self._source())
+
+    def test_overlay_is_installed_before_dataset_import(self) -> None:
+        src = self._source()
+        install = src.index("_install_writable_dataset_helper(upstream_root, 0)")
+        builder = src.index("from megatron.core.datasets.blended_megatron_dataset_builder")
+        self.assertLess(
+            install,
+            builder,
+            "helpers_cpp overlay must be installed before importing the dataset builder",
+        )
+
+    def test_real_null_tokenizer_is_used(self) -> None:
+        src = self._source()
+        self.assertIn(
+            "from megatron.training.tokenizer.tokenizer import _NullTokenizer", src
+        )
+        self.assertNotIn("class _NullTokenizer", src)
+
+    def test_process_group_is_initialised(self) -> None:
+        self.assertIn('init_process_group(backend="gloo"', self._source())
+
 if __name__ == "__main__":
     unittest.main()

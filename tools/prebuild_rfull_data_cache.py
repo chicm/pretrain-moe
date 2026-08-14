@@ -113,6 +113,16 @@ def build(
     if not dist.is_initialized():
         dist.init_process_group(backend="gloo", rank=0, world_size=1)
 
+    # GPTDataset index construction is implemented in the compiled helpers_cpp
+    # extension.  The pinned MCore tree is root-owned, so upstream's
+    # _compile_dependencies() cannot build it in place; the project entrypoint
+    # installs a hash-verified writable overlay instead.  Reuse that exact code
+    # path -- without it the build scans the whole corpus and only then dies
+    # with ModuleNotFoundError: megatron.core.datasets.helpers_cpp.
+    from tools.rfull_rocm_entrypoint import _install_writable_dataset_helper
+
+    _install_writable_dataset_helper(upstream_root, 0)
+
     from megatron.core.datasets.blended_megatron_dataset_builder import (
         BlendedMegatronDatasetBuilder,
     )
