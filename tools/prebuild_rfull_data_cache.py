@@ -11,7 +11,7 @@ pure waste, and Megatron's default 10 minute watchdog kills it outright.
 The cache key depends on the blend, split, sequence length, seed and the
 requested sample counts, so a cache built for mini qualification does NOT
 serve the production run.  This tool builds the exact cache a given config
-will look for, using one CPU process and no distributed init.
+will look for, using one CPU process and a trivial 1-rank process group.
 
 Fail-closed: verifies every produced index is readable and non-empty, and
 refuses to report success if any shard is missing.
@@ -101,8 +101,17 @@ def build(
         return plan
 
     sys.path.insert(0, str(upstream_root))
+    # BlendedDataset._build_indices calls torch.distributed.get_rank(), so even
+    # a single-process offline build needs a process group to exist.
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", "0")
+    os.environ.setdefault("MASTER_PORT", "29857")
+    os.environ.setdefault("RANK", "0")
+    os.environ.setdefault("WORLD_SIZE", "1")
+
+    import torch.distributed as dist
+
+    if not dist.is_initialized():
+        dist.init_process_group(backend="gloo", rank=0, world_size=1)
 
     from megatron.core.datasets.blended_megatron_dataset_builder import (
         BlendedMegatronDatasetBuilder,
