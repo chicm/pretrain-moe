@@ -78,6 +78,9 @@ def build(
         seq_length = int(model["seq_length"])
     else:
         raise SystemExit("config model has neither sequence_length nor seq_length")
+    # NullTokenizer is constructed with the pre-padding vocab size; MCore
+    # derives eod = vocab_size.  The trainer passes --vocab-size, so mirror it.
+    vocab_size = int(model.get("vocab_size", model.get("native_vocab_size", 151669)))
     seed = int(runtime.get("seed", config.get("seed", 1234)))
 
     train_s, valid_s, test_s = _sample_counts(config)
@@ -89,6 +92,7 @@ def build(
         "split": split,
         "seq_length": seq_length,
         "seed": seed,
+        "vocab_size": vocab_size,
         "samples": {"train": train_s, "valid": valid_s, "test": test_s},
         "builder_threads": int(builder_threads),
     }
@@ -106,6 +110,11 @@ def build(
     from megatron.core.datasets.gpt_dataset import GPTDataset, GPTDatasetConfig
     from megatron.core.datasets.utils import get_blend_from_list
 
+    # The cache key embeds tokenizer.unique_identifiers, so the pre-build MUST
+    # use the same tokenizer object the trainer builds -- a local stub produces
+    # a different description and therefore a cache the trainer never finds.
+    from megatron.training.tokenizer.tokenizer import _NullTokenizer
+
     weights = [float(e["weight"]) for e in blend_entries]
     prefixes = [str(e["prefix"]) for e in blend_entries]
     interleaved: list[str] = []
@@ -114,11 +123,6 @@ def build(
 
     cache_path.mkdir(parents=True, exist_ok=True)
 
-    class _NullTokenizer:
-        def __init__(self, eod: int) -> None:
-            self.eod = eod
-
-    eod = int(config["model"].get("eot_token_id", 151643))
     ds_config = GPTDatasetConfig(
         random_seed=seed,
         sequence_length=seq_length,
@@ -128,7 +132,7 @@ def build(
         num_dataset_builder_threads=int(builder_threads),
         path_to_cache=str(cache_path),
         mmap_bin_files=True,
-        tokenizer=_NullTokenizer(eod),
+        tokenizer=_NullTokenizer(vocab_size),
         reset_position_ids=False,
         reset_attention_mask=False,
         eod_mask_loss=False,
