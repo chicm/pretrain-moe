@@ -200,6 +200,19 @@ def validate_config(config: dict[str, Any]) -> None:
             isinstance(data.get("split"), str) and data["split"].count(",") == 2,
             "data.split must be a 'train,valid,test' string",
         )
+        # Building GPTDataset indices over a real multi-hundred-shard blend is a
+        # one-time, single-process, CPU-bound cost while every other rank waits
+        # on a barrier.  Megatron's 10 minute default NCCL watchdog kills that
+        # barrier long before the build finishes (observed: SIGABRT on a
+        # 1-element ALLREDUCE after 600013 ms).  Real-data runs must therefore
+        # state a timeout explicitly rather than inherit a qualification-sized
+        # default.
+        _require(
+            isinstance(runtime.get("distributed_timeout_minutes"), int)
+            and runtime["distributed_timeout_minutes"] > 0,
+            "real-data runs must set runtime.distributed_timeout_minutes "
+            "(the 10 minute default aborts index construction)",
+        )
 
 
 def build_megatron_args(
@@ -306,6 +319,9 @@ def build_megatron_args(
         for entry in data["blend"]:
             blend.extend([str(float(entry["weight"])), entry["prefix"]])
         args.extend(["--split", data["split"], "--data-path", *blend])
+        args.extend(
+            ["--distributed-timeout-minutes", str(runtime["distributed_timeout_minutes"])]
+        )
     if save_dir:
         if not save_interval or save_interval <= 0:
             raise ConfigError("save_interval must be positive when save_dir is set")

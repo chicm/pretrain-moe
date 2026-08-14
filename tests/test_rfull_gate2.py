@@ -360,6 +360,7 @@ class RFullProductionDataBlendTests(unittest.TestCase):
     def _real_data_config(self) -> dict:
         config = copy.deepcopy(load_config(MINI_CONFIG))
         config["runtime"]["mock_data"] = False
+        config["runtime"]["distributed_timeout_minutes"] = 180
         config["data"] = {
             "split": "990,9,1",
             "blend": [
@@ -368,6 +369,33 @@ class RFullProductionDataBlendTests(unittest.TestCase):
             ],
         }
         return config
+
+    def test_real_data_requires_an_explicit_distributed_timeout(self) -> None:
+        # Regression: the 10 minute default aborted first-time index
+        # construction over a 487 shard blend with a watchdog SIGABRT on a
+        # 1-element ALLREDUCE after 600013 ms.
+        config = self._real_data_config()
+        del config["runtime"]["distributed_timeout_minutes"]
+        with self.assertRaises(ConfigError):
+            validate_config(config)
+
+    def test_distributed_timeout_must_be_a_positive_int(self) -> None:
+        for bad in (0, -5, "180", 1.5, None):
+            config = self._real_data_config()
+            config["runtime"]["distributed_timeout_minutes"] = bad
+            with self.assertRaises(ConfigError):
+                validate_config(config)
+
+    def test_real_blend_emits_the_configured_timeout(self) -> None:
+        args = build_megatron_args(self._real_data_config(), data_cache_path="/shared/cache")
+        self.assertIn("--distributed-timeout-minutes", args)
+        self.assertEqual(args[args.index("--distributed-timeout-minutes") + 1], "180")
+
+    def test_mock_data_does_not_require_a_timeout(self) -> None:
+        # Qualification runs keep upstream's default; only real-data runs pay
+        # the index construction cost.
+        args = build_megatron_args(load_config(MINI_CONFIG), data_cache_path="/shared/cache")
+        self.assertNotIn("--distributed-timeout-minutes", args)
 
     def test_mock_data_still_emits_mock_flags(self) -> None:
         args = build_megatron_args(load_config(MINI_CONFIG), data_cache_path="/shared/cache")
