@@ -326,6 +326,28 @@ def build_megatron_args(
         if not save_interval or save_interval <= 0:
             raise ConfigError("save_interval must be positive when save_dir is set")
         args.extend(["--save", save_dir, "--save-interval", str(save_interval)])
+        # Upstream MCore (pinned 5cb6dbb) cannot save a GLU GroupedMLP under the
+        # distributed optimizer when the fully-parallel ("fully_sharded_model_space")
+        # strategy is used and the per-rank optimizer slice does not align with the
+        # gate/up chunk boundary.  GroupedMLP.sharded_state_dict rebases only one
+        # argument of its `min(...)` when clamping a slice to a chunk, so a slice
+        # that straddles chunks yields flattened ranges that do not tile the shard
+        # and dist_checkpointing/validation.py raises
+        # "Flattened ranges dont cover the whole shard".
+        #
+        # This is geometry dependent, which is why single-node and 2-node gates
+        # never caught it: the shard only straddles a chunk when the expert
+        # optimizer shard size is not a whole multiple of the chunk size.
+        #   16 ranks / EP8 -> expert-DP 2  -> 12.0 chunks per shard -> aligned, saves fine
+        #   120 ranks / EP8 -> expert-DP 15 ->  1.6 chunks per shard -> straddles, fails
+        #
+        # `--no-ckpt-fully-parallel-save` selects the 'dp_zero_gather_scatter'
+        # sharding type, which does not use flattened ranges at all, so it avoids
+        # the defect without patching root-owned pinned MCore.  Upstream's only
+        # documented tradeoff is that the checkpoint cannot be resumed under a
+        # *different* parallelism, which is acceptable here because the production
+        # geometry is frozen.
+        args.append("--no-ckpt-fully-parallel-save")
     elif save_interval is not None:
         raise ConfigError("save_interval requires save_dir")
     if load_dir:

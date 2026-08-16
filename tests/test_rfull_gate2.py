@@ -112,6 +112,16 @@ class RFullGate2ConfigTests(unittest.TestCase):
         self.assertEqual(args[args.index("--save-interval") + 1], "3")
         self.assertEqual(args[args.index("--exit-interval") + 1], "3")
         self.assertEqual(args[args.index("--load") + 1], "/shared/checkpoints/run-a")
+        # Saving must disable the fully-parallel ("fully_sharded_model_space")
+        # optimizer sharding strategy.  Upstream MCore's GLU GroupedMLP produces
+        # flattened ranges that do not tile the shard when a distributed-optimizer
+        # slice straddles a gate/up chunk boundary, which is what broke the
+        # 120-rank save (expert-DP 15 -> 1.6 chunks per shard).  The 16-rank gates
+        # never caught it because expert-DP 2 gives a whole 12.0 chunks per shard.
+        self.assertIn("--no-ckpt-fully-parallel-save", args)
+        # It is only meaningful when actually saving.
+        no_save = build_megatron_args(mini, data_cache_path="/shared/cache", train_iters=6)
+        self.assertNotIn("--no-ckpt-fully-parallel-save", no_save)
         with self.assertRaisesRegex(ConfigError, "save_interval"):
             build_megatron_args(
                 mini, data_cache_path="/shared/cache", save_dir="/shared/checkpoints/run-b"
