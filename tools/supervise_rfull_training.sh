@@ -37,6 +37,10 @@ RUNROOT=${2:?run_root}
 CKPT=${3:?ckpt_dir}
 MAXATT=${4:-10}
 HOSTS=${5:-node-0,node-1,node-2,node-3,node-4,node-5,node-6,node-7,node-8,node-9,node-10,node-11,node-12,node-13,node-14}
+# Hard wall-clock bound per attempt, and grace period granted to peer ranks to
+# unwind after a SIGSEGV is first observed. Override via environment.
+ATTEMPT_TIMEOUT=${ATTEMPT_TIMEOUT:-7200}
+CRASH_GRACE=${CRASH_GRACE:-180}
 LOG=$RUNROOT/supervisor.log
 
 export RFULL_CACHE_MODE=replicated
@@ -102,10 +106,34 @@ for att in $(seq 1 $MAXATT); do
   PORT=$((28000 + RANDOM % 1500))
   log "attempt $att START from_iter=$before port=$PORT"
   s=$(date -u +%s)
-  bash $D/tools/run_rfull_gate3_controller.sh \
+
+  # The controller does NOT return when a rank dies: surviving ranks sit in a
+  # 600 s collective watchdog and the per-node SSH wrappers never exit, so the
+  # controller blocked for ~59 min in the first burn-in.  Two guards:
+  #   (a) hard wall-clock bound via `timeout`
+  #   (b) fail-fast: once a SIGSEGV appears, give peers GRACE seconds to
+  #       unwind, then tear the attempt down instead of waiting out (a).
+  timeout --kill-after=120 "$ATTEMPT_TIMEOUT" \
+    bash $D/tools/run_rfull_gate3_controller.sh \
       "$CFG" "$RUN" "$D" "$MEG" "$PORT" "$CACHE" \
       --save-dir "$CKPT" --load-dir "$CKPT" --save-interval 25 \
-      >> "$RUN.controller.log" 2>&1
+      >> "$RUN.controller.log" 2>&1 &
+  cpid=$!
+
+  crash_at=0
+  while kill -0 $cpid 2>/dev/null; do
+    sleep 30
+    if [ "$crash_at" = "0" ] && grep -rqa 'exitcode: -11' "$RUN" 2>/dev/null; then
+      crash_at=$(date -u +%s)
+      log "attempt $att: SIGSEGV detected, allowing ${CRASH_GRACE}s for teardown"
+    fi
+    if [ "$crash_at" != "0" ] && [ $(( $(date -u +%s) - crash_at )) -ge "$CRASH_GRACE" ]; then
+      log "attempt $att: tearing down after crash (controller did not exit)"
+      kill -TERM $cpid 2>/dev/null; sleep 10; kill -KILL $cpid 2>/dev/null
+      break
+    fi
+  done
+  wait $cpid 2>/dev/null
   rc=$?
   el=$(( $(date -u +%s) - s ))
   after=$(latest_iter)
