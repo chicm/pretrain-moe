@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from collections import defaultdict
 from functools import wraps
 from typing import Any, Callable
@@ -171,7 +172,55 @@ def _batch_fingerprint(batch: Any) -> str:
 
 
 def rfull_forward_step(data_iterator, model):
-    """Delegate to pinned GPT forward_step while recording data-order evidence."""
+    """Delegate to pinned GPT forward_step while recording data-order evidence.
+
+    Exceptions are captured and printed here before they propagate.  Pinned
+    MCore wraps ``forward_step`` in ``StragglerDetector`` whose ``__exit__``
+    formats the in-flight exception via ``traceback.format_exception``; that
+    formatting has been observed to segfault, destroying the process before
+    the real error is ever logged.  Reporting from inside our own frame keeps
+    the diagnosis independent of that pinned, root-owned code path.
+    """
+    try:
+        return _rfull_forward_step_inner(data_iterator, model)
+    except BaseException as exc:  # noqa: BLE001 - re-raised after reporting
+        _report_forward_step_exception(exc)
+        raise
+
+
+def _report_forward_step_exception(exc: BaseException) -> None:
+    """Print a self-contained record of ``exc`` to stdout and stderr.
+
+    Uses only already-imported stdlib and avoids ``linecache`` source lookups,
+    so it stays usable when the interpreter is in a fragile state.
+    """
+    import traceback
+
+    try:
+        import torch
+
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
+    except BaseException:  # noqa: BLE001 - diagnostics must never mask exc
+        rank = -1
+    header = json.dumps(
+        {
+            "marker": "RFULL_FORWARD_STEP_EXCEPTION",
+            "rank": rank,
+            "type": type(exc).__name__,
+            "repr": repr(exc)[:2000],
+        },
+        sort_keys=True,
+    )
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            print(header, file=stream, flush=True)
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=stream)
+            stream.flush()
+        except BaseException:  # noqa: BLE001 - never mask the original failure
+            pass
+
+
+def _rfull_forward_step_inner(data_iterator, model):
     import torch
     from megatron.training import get_args
     from pretrain_gpt import forward_step as pinned_forward_step
