@@ -85,9 +85,11 @@ if [[ "$RFULL_CACHE_MODE" == "shared" ]]; then
   CACHE_PROOF="sha256sum '$PROBE' 2>/dev/null | awk '{print \$1}'"
 elif [[ "$RFULL_CACHE_MODE" == "replicated" ]]; then
   # Prove every node holds byte-equivalent contents: fingerprint the sorted
-  # (name, size) listing. No probe file is written, so nothing to clean up.
+  # (name, size) listing. Transient probe files written by shared mode are
+  # excluded -- they are per-run scratch, not cache content, and a stale one
+  # left on a single node must not fail an otherwise-identical replica.
   PROBE=""
-  CACHE_FP_CMD="find '$DATA_CACHE_PATH' -type f -printf '%f\t%s\n' | LC_ALL=C sort | sha256sum | awk '{print \$1}'"
+  CACHE_FP_CMD="find '$DATA_CACHE_PATH' -type f ! -name '.shared-probe-*' -printf '%f\t%s\n' | LC_ALL=C sort | sha256sum | awk '{print \$1}'"
   CACHE_SHA=$(eval "$CACHE_FP_CMD")
   CACHE_PROOF="$CACHE_FP_CMD"
   if [[ -z "$CACHE_SHA" ]]; then
