@@ -44,16 +44,30 @@ if [[ ${#HOST_ARRAY[@]} -ne $EXPECTED_NNODES ]]; then
   exit 2
 fi
 mkdir -p "$RUN_DIR"
-if (( EXPECTED_NNODES > 1 )); then
+if [[ -n "${MEGATRON_DATA_CACHE_PATH:-}" ]]; then
+  # Replicated node-local cache: every node holds a byte-identical copy at the
+  # SAME absolute path. Required because MCore memory-maps these .npy files and
+  # mmap over blobfuse has already produced a SIGSEGV inside numpy open_memmap.
+  # Used verbatim -- do NOT derive a per-run subdirectory, or the prebuilt
+  # entries would be invisible and each rank would rebuild them over FUSE.
+  if [[ ! "$MEGATRON_DATA_CACHE_PATH" =~ $safe_path ]]; then
+    echo "unsafe MEGATRON_DATA_CACHE_PATH: $MEGATRON_DATA_CACHE_PATH" >&2
+    exit 2
+  fi
+  DATA_CACHE_PATH="$MEGATRON_DATA_CACHE_PATH"
+  CACHE_MODE=replicated
+elif (( EXPECTED_NNODES > 1 )); then
   : "${MEGATRON_SHARED_CACHE_ROOT:?set MEGATRON_SHARED_CACHE_ROOT to a cross-node shared directory}"
   CACHE_KEY=$(printf '%s' "$RUN_DIR" | sha256sum | awk '{print $1}')
   DATA_CACHE_PATH="${MEGATRON_SHARED_CACHE_ROOT%/}/${CACHE_KEY}"
+  CACHE_MODE=shared
 else
   DATA_CACHE_PATH="$RUN_DIR/data-cache"
+  CACHE_MODE=local
 fi
 mkdir -p "$DATA_CACHE_PATH"
-printf '{"marker":"DATA_CACHE_PATH","nnodes":%d,"path":"%s"}\n' \
-  "$EXPECTED_NNODES" "$DATA_CACHE_PATH"
+printf '{"marker":"DATA_CACHE_PATH","nnodes":%d,"path":"%s","mode":"%s"}\n' \
+  "$EXPECTED_NNODES" "$DATA_CACHE_PATH" "$CACHE_MODE"
 cp "$PROFILE_JSON" "$RUN_DIR/profile.json"
 printf '{"marker":"CONTROLLER_START","hosts":"%s","master_addr":"%s","master_port":%s,"utc":"%s"}\n' \
   "$HOSTS" "$MASTER_ADDR" "$MASTER_PORT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
