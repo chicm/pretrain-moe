@@ -43,16 +43,13 @@ def _sample_counts(config: dict) -> tuple[int, int, int]:
     eval_rounds = train_iters // eval_interval + 1
     valid_samples = eval_rounds * eval_iters * gbs
     test_samples = eval_iters * gbs
-    # MCore's BlendedMegatronDatasetBuilder constructs the valid/test GPTDatasets
-    # even when zero eval samples are requested, and building a GPTDataset always
-    # writes its *_document_index.npy cache entry. With a node-local cache that
-    # asymmetry is fatal: caches are built on GLOBAL RANK 0 only, so node-0 makes
-    # the file and the other 14 nodes die with FileNotFoundError.
-    #
-    # So never plan zero samples for a split -- ask for one batch, which produces
-    # the same cache key the run will look up at a negligible build cost.
-    valid_samples = max(valid_samples, gbs)
-    test_samples = max(test_samples, gbs)
+    # These counts must match Megatron's train_val_test_num_samples EXACTLY,
+    # because num_samples is part of the GPTDataset cache key. Do NOT floor them
+    # to a minimum: with eval_iters=0 the run asks for a valid dataset built
+    # with num_samples=0, and flooring to one batch produces a DIFFERENT key
+    # that the run will never look up. (Learned the hard way -- the floor made
+    # the prebuild "succeed" while every non-rank-0 node still died with
+    # FileNotFoundError on the valid split.)
     return train_samples, valid_samples, test_samples
 
 

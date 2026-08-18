@@ -50,19 +50,19 @@ class SampleCountTests(unittest.TestCase):
         self.assertGreater(valid, 0)
         self.assertGreater(test, 0)
 
-    def test_zero_eval_iters_still_plans_valid_and_test_samples(self) -> None:
-        # Regression guard. MCore's builder constructs the valid/test
-        # GPTDatasets even when zero eval samples are requested, and building a
-        # GPTDataset always writes its document-index cache entry. Caches are
-        # built on GLOBAL RANK 0 only, so if the prebuild skips these splits,
-        # node-0 creates them at runtime and the other 14 nodes die with
-        # FileNotFoundError on a node-local cache.
+    def test_zero_eval_iters_plans_zero_eval_samples(self) -> None:
+        # The counts must mirror Megatron's train_val_test_num_samples EXACTLY,
+        # because num_samples is part of the GPTDataset cache key. An earlier
+        # attempt floored valid/test to one batch so the prebuild would "cover"
+        # them; that produced a different key from the one the run looks up, and
+        # every non-rank-0 node still died with FileNotFoundError on the valid
+        # split. Zero must stay zero.
         config = _config()
         config["training"]["eval_iters"] = 0
         train, valid, test = _sample_counts(config)
         self.assertEqual(train, config["training"]["train_iters"] * 960)
-        self.assertGreaterEqual(valid, 960)
-        self.assertGreaterEqual(test, 960)
+        self.assertEqual(valid, 0)
+        self.assertEqual(test, 0)
 
 
 class GuardTests(unittest.TestCase):

@@ -45,7 +45,7 @@
     "seed": 1234,
     "bf16": true,
     "eval_interval": 1000,
-    "eval_iters": 0
+    "eval_iters": 1
   },
   "runtime": {
     "transformer_impl": "transformer_engine",
