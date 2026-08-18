@@ -203,8 +203,13 @@ def build_megatron_args(
         "--distributed-backend", "nccl",
         "--no-masked-softmax-fusion",
         "--log-interval", str(runtime["log_interval"]),
-        "--eval-interval", str(max(1000, train_iters + 1)),
-        "--eval-iters", "1",
+        # Eval settings must come from the config, not be hardcoded here: the
+        # data-cache prebuilder derives the valid/test sample counts (and hence
+        # the cache KEY) from these same fields. When they disagree, the run
+        # asks for a cache entry that was never prebuilt and every non-rank-0
+        # node dies with FileNotFoundError.
+        "--eval-interval", str(train.get("eval_interval", max(1000, train_iters + 1))),
+        "--eval-iters", str(train.get("eval_iters", 1)),
     ]
     if model.get("num_query_groups", model["num_attention_heads"]) != model["num_attention_heads"]:
         args += ["--group-query-attention", "--num-query-groups", str(model["num_query_groups"])]

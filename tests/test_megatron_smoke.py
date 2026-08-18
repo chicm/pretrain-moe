@@ -56,6 +56,19 @@ class DenseSmokeConfigTests(unittest.TestCase):
         self.assertEqual(args[args.index("--num-layers") + 1], "18")
         self.assertEqual(args[args.index("--tensor-model-parallel-size") + 1], "2")
 
+    def test_eval_settings_come_from_config_not_hardcoded(self) -> None:
+        # Regression guard: the data-cache prebuilder derives the valid/test
+        # sample counts -- and therefore the cache KEY -- from eval_interval and
+        # eval_iters. When the launcher hardcoded these instead of reading the
+        # config, the run requested a cache entry that was never prebuilt and
+        # every non-rank-0 node died with FileNotFoundError on the valid split.
+        config = copy.deepcopy(self.config)
+        config["training"]["eval_interval"] = 1000
+        config["training"]["eval_iters"] = 1
+        args = build_megatron_args(config, "/tmp/run")
+        self.assertEqual(args[args.index("--eval-interval") + 1], "1000")
+        self.assertEqual(args[args.index("--eval-iters") + 1], "1")
+
     def test_real_data_blend_renders_weighted_data_path(self) -> None:
         # The dense path must be able to read the SAME real corpus as the MoE
         # path, so it can serve as a one-variable control for crash triage.
