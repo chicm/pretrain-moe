@@ -56,6 +56,56 @@ class DenseSmokeConfigTests(unittest.TestCase):
         self.assertEqual(args[args.index("--num-layers") + 1], "18")
         self.assertEqual(args[args.index("--tensor-model-parallel-size") + 1], "2")
 
+    def test_real_data_blend_renders_weighted_data_path(self) -> None:
+        # The dense path must be able to read the SAME real corpus as the MoE
+        # path, so it can serve as a one-variable control for crash triage.
+        config = copy.deepcopy(self.config)
+        config["runtime"]["mock_data"] = False
+        config["data"] = {
+            "split": "990,9,1",
+            "blend": [
+                {"weight": 2.0, "prefix": "/corpus/shard_a"},
+                {"weight": 0.5, "prefix": "/corpus/shard_b"},
+            ],
+        }
+        args = build_megatron_args(config, "/tmp/run")
+        self.assertNotIn("--mock-data", args)
+        start = args.index("--data-path")
+        self.assertEqual(
+            args[start + 1 : start + 5],
+            ["2.0", "/corpus/shard_a", "0.5", "/corpus/shard_b"],
+        )
+        self.assertEqual(args[args.index("--split") + 1], "990,9,1")
+
+    def test_real_data_and_mock_data_are_mutually_exclusive(self) -> None:
+        config = copy.deepcopy(self.config)
+        config["runtime"]["mock_data"] = True
+        config["data"] = {"blend": [{"weight": 1.0, "prefix": "/corpus/a"}]}
+        with self.assertRaises(ConfigError):
+            build_megatron_args(config, "/tmp/run")
+
+    def test_disabling_mock_data_without_a_blend_fails_closed(self) -> None:
+        # Never silently fall back to mock tokens on a real run.
+        config = copy.deepcopy(self.config)
+        config["runtime"]["mock_data"] = False
+        config.pop("data", None)
+        with self.assertRaises(ConfigError):
+            build_megatron_args(config, "/tmp/run")
+
+    def test_blend_entry_requires_absolute_prefix_and_positive_weight(self) -> None:
+        config = copy.deepcopy(self.config)
+        config["runtime"]["mock_data"] = False
+        for bad in (
+            {"weight": 1.0, "prefix": "relative/path"},
+            {"weight": 0, "prefix": "/corpus/a"},
+            {"weight": -1.0, "prefix": "/corpus/a"},
+            {"prefix": "/corpus/a"},
+        ):
+            with self.subTest(entry=bad):
+                config["data"] = {"blend": [bad]}
+                with self.assertRaises(ConfigError):
+                    build_megatron_args(config, "/tmp/run")
+
     def test_torchrun_command_is_one_agent_for_the_requested_node(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             upstream = pathlib.Path(directory)

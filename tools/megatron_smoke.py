@@ -179,7 +179,7 @@ def build_megatron_args(
         "--rotary-base", str(model["rotary_base"]),
         "--tokenizer-type", "NullTokenizer",
         "--vocab-size", str(model["vocab_size"]),
-        "--split", "949,50,1",
+        "--split", str((config.get("data") or {}).get("split", "949,50,1")),
         "--data-cache-path", str(data_cache_path or pathlib.Path(run_dir) / "data-cache"),
         "--micro-batch-size", str(train["micro_batch_size"]),
         "--global-batch-size", str(train["global_batch_size"]),
@@ -213,7 +213,39 @@ def build_megatron_args(
     _flag(args, not model.get("tie_embeddings", True), "--untie-embeddings-and-output-weights")
     _flag(args, model.get("position_embedding_type") == "rope", "--no-position-embedding")
     _flag(args, train.get("bf16", False), "--bf16")
-    _flag(args, runtime.get("mock_data", False), "--mock-data")
+    # Data source is a fail-closed choice, mirroring the MoE path: either mock
+    # tokens or a real corpus blend, never a silent fallback. The dense path
+    # needs real data so it can serve as a CONTROL for the MoE crash
+    # investigation -- one of the observed crash stacks was inside GPTDataset's
+    # numpy mmap, so a mock-data dense run would not exercise the same code and
+    # could not falsify a data-path hypothesis.
+    data = config.get("data")
+    if runtime.get("mock_data", False):
+        if data is not None:
+            raise ConfigError("runtime.mock_data=true forbids a data blend")
+        args.append("--mock-data")
+    else:
+        if not isinstance(data, dict):
+            raise ConfigError(
+                "runtime.mock_data must be true, or config.data must define a real blend"
+            )
+        blend = data.get("blend")
+        if not isinstance(blend, list) or not blend:
+            raise ConfigError("data.blend must be a non-empty list")
+        weighted: list[str] = []
+        for entry in blend:
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("weight"), (int, float))
+                or float(entry["weight"]) <= 0
+                or not isinstance(entry.get("prefix"), str)
+                or not entry["prefix"].startswith("/")
+            ):
+                raise ConfigError(
+                    "each data.blend entry needs a positive weight and an absolute prefix"
+                )
+            weighted.extend([repr(float(entry["weight"])), entry["prefix"]])
+        args.extend(["--data-path", *weighted])
     _flag(args, runtime.get("distributed_optimizer", False), "--use-distributed-optimizer")
     _flag(args, runtime.get("sequence_parallel", False), "--sequence-parallel")
     _flag(args, runtime.get("overlap_grad_reduce", False), "--overlap-grad-reduce")
