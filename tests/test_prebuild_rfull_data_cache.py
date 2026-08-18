@@ -50,6 +50,20 @@ class SampleCountTests(unittest.TestCase):
         self.assertGreater(valid, 0)
         self.assertGreater(test, 0)
 
+    def test_zero_eval_iters_still_plans_valid_and_test_samples(self) -> None:
+        # Regression guard. MCore's builder constructs the valid/test
+        # GPTDatasets even when zero eval samples are requested, and building a
+        # GPTDataset always writes its document-index cache entry. Caches are
+        # built on GLOBAL RANK 0 only, so if the prebuild skips these splits,
+        # node-0 creates them at runtime and the other 14 nodes die with
+        # FileNotFoundError on a node-local cache.
+        config = _config()
+        config["training"]["eval_iters"] = 0
+        train, valid, test = _sample_counts(config)
+        self.assertEqual(train, config["training"]["train_iters"] * 960)
+        self.assertGreaterEqual(valid, 960)
+        self.assertGreaterEqual(test, 960)
+
 
 class GuardTests(unittest.TestCase):
     def test_mock_data_config_is_rejected(self) -> None:

@@ -61,7 +61,7 @@
     "log_interval": 1
   },
   "data": {
-    "split": "1000,0,0",
+    "split": "998,1,1",
     "blend": []
   }
 }
