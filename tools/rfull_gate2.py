@@ -215,6 +215,68 @@ def validate_config(config: dict[str, Any]) -> None:
         )
 
 
+def _lr_schedule_args(training: dict[str, Any], iterations: int) -> list[str]:
+    """Build the LR-schedule flags.
+
+    Two shapes are supported, chosen by whether the config asks for one:
+
+    Qualification (default): a plain cosine over the whole (tiny) run with a
+    1-iteration warmup.  Gates care that the optimizer steps at all, not about
+    schedule shape, and a 2543-iteration warmup inside a 4-iteration gate would
+    mean every gate trains at ~0 LR.
+
+    Production (`training.lr_schedule`): warmup-stable-decay.  The frozen R-Full
+    design specifies constant peak LR through a long stable phase and only then a
+    cosine anneal to min_lr, which a plain `--lr-decay-style cosine` cannot
+    express -- cosine starts decaying at the first post-warmup step, so using it
+    would silently train a materially different schedule than the one signed off.
+
+    MCore's 'WSD' style maps onto the design exactly (verified bit-identical over
+    the full 254,313-step sweep):
+        u <= warmup                  -> linear ramp 0 -> peak
+        warmup < u <= total - decay  -> constant peak
+        u > total - decay            -> cosine peak -> min over `decay` steps
+    """
+    schedule = training.get("lr_schedule")
+    if schedule is None:
+        return [
+            "--lr-decay-style", "cosine",
+            "--lr-decay-iters", str(iterations),
+            "--lr-warmup-iters", "1",
+        ]
+
+    style = schedule.get("style")
+    if style != "warmup_stable_decay":
+        raise ConfigError(f"unsupported training.lr_schedule.style {style!r}")
+    warmup = schedule.get("warmup_iters")
+    decay = schedule.get("decay_iters")
+    for name, value in (("warmup_iters", warmup), ("decay_iters", decay)):
+        if not isinstance(value, int) or value <= 0:
+            raise ConfigError(f"lr_schedule.{name} must be a positive int")
+    # The stable phase is what is left over; if it is not positive the three
+    # phases do not fit inside the run and the schedule is misspecified.
+    if warmup + decay >= iterations:
+        raise ConfigError(
+            f"lr_schedule warmup({warmup}) + decay({decay}) must be < train_iters({iterations})"
+        )
+    # Cross-check against the design's stated boundary when it is supplied, so a
+    # typo in any single field is caught rather than silently reshaping the run.
+    stable_end = schedule.get("stable_end_iter")
+    if stable_end is not None and stable_end != iterations - decay:
+        raise ConfigError(
+            f"lr_schedule.stable_end_iter {stable_end} disagrees with "
+            f"train_iters - decay_iters ({iterations - decay})"
+        )
+    return [
+        "--lr-decay-style", "WSD",
+        "--lr-wsd-decay-style", "cosine",
+        "--lr-wsd-decay-iters", str(decay),
+        "--lr-decay-iters", str(iterations),
+        "--lr-warmup-iters", str(warmup),
+        "--lr-warmup-init", "0.0",
+    ]
+
+
 def build_megatron_args(
     config: dict[str, Any],
     *,
@@ -237,7 +299,11 @@ def build_megatron_args(
         "--transformer-impl", "transformer_engine",
         "--attention-backend", runtime["attention_backend"],
         "--rfull-profile", config["rfull_profile"],
-        "--rfull-qualification-only",
+        # Run intent is declared by the config, not hardcoded: gate configs stay
+        # qualification runs, and only a config that explicitly sets
+        # production_launch=true can start the real thing.
+        ("--rfull-production-launch" if config.get("production_launch")
+         else "--rfull-qualification-only"),
         "--rfull-expected-local-parameters", str(model["expected_local_parameters"]),
         "--num-layers", str(model["num_layers"]),
         "--hidden-size", str(model["hidden_size"]),
@@ -255,7 +321,7 @@ def build_megatron_args(
         "--position-embedding-type", "rope",
         "--no-position-embedding",
         "--rotary-percent", "1.0",
-        "--rotary-base", "10000",
+        "--rotary-base", str(model.get("rotary_base", 10000)),
         "--tokenizer-type", "NullTokenizer",
         "--vocab-size", str(model["native_vocab_size"]),
         "--make-vocab-size-divisible-by", str(model["make_vocab_size_divisible_by"]),
@@ -284,9 +350,7 @@ def build_megatron_args(
         "--train-iters", str(iterations),
         "--lr", str(training["learning_rate"]),
         "--min-lr", str(training["min_learning_rate"]),
-        "--lr-decay-style", "cosine",
-        "--lr-decay-iters", str(iterations),
-        "--lr-warmup-iters", "1",
+        *_lr_schedule_args(training, iterations),
         "--weight-decay", str(training["weight_decay"]),
         "--adam-beta1", str(training["adam_beta1"]),
         "--adam-beta2", str(training["adam_beta2"]),
@@ -305,8 +369,11 @@ def build_megatron_args(
         "--no-bias-dropout-fusion",
         "--no-rope-fusion",
         "--log-interval", str(runtime["log_interval"]),
-        "--eval-interval", str(max(1000, iterations + 1)),
-        "--eval-iters", "1",
+        # Gates have no meaningful validation split, so they default to "never
+        # evaluate" (interval past the end of the run). A long production run
+        # does have one and must actually use it, so both are config-overridable.
+        "--eval-interval", str(runtime.get("eval_interval") or max(1000, iterations + 1)),
+        "--eval-iters", str(runtime.get("eval_iters", 1)),
         "--ckpt-format", "torch_dist",
     ]
     # Data source: mock tokens for qualification, or a real weighted blend.

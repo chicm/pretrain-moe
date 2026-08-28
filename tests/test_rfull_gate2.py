@@ -152,8 +152,10 @@ class RFullGate2ConfigTests(unittest.TestCase):
             ]
         )
         self.assertFalse(parsed.rfull_qualification_only)
+        self.assertFalse(parsed.rfull_production_launch)
         args = SimpleNamespace(
             rfull_qualification_only=False,
+            rfull_production_launch=False,
             use_legacy_models=False,
             transformer_impl="transformer_engine",
             rfull_profile="ep8-mini",
@@ -161,8 +163,40 @@ class RFullGate2ConfigTests(unittest.TestCase):
             padded_vocab_size=4096,
             make_vocab_size_divisible_by=128,
         )
-        with self.assertRaisesRegex(RuntimeError, "production launch remains blocked"):
+        # Neither intent declared -> refuse to run at all.
+        with self.assertRaisesRegex(RuntimeError, "declare run intent"):
             _validate_runtime_args(args)
+
+    def test_runtime_args_reject_conflicting_or_unsound_production_intent(self) -> None:
+        def make(**overrides: object) -> SimpleNamespace:
+            base = dict(
+                rfull_qualification_only=False,
+                rfull_production_launch=True,
+                use_legacy_models=False,
+                transformer_impl="transformer_engine",
+                rfull_profile="production",
+                mock_data=False,
+                vocab_size=151669,
+                padded_vocab_size=151936,
+                make_vocab_size_divisible_by=1187,
+            )
+            base.update(overrides)
+            return SimpleNamespace(**base)
+
+        # Both intents at once is a contradiction.
+        with self.assertRaisesRegex(RuntimeError, "mutually exclusive"):
+            _validate_runtime_args(make(rfull_qualification_only=True))
+        # "Production" on gate geometry would silently train the wrong model.
+        with self.assertRaisesRegex(RuntimeError, "requires the production profile"):
+            _validate_runtime_args(
+                make(rfull_profile="ep8-mini", vocab_size=4000, padded_vocab_size=4096,
+                     make_vocab_size_divisible_by=128)
+            )
+        # "Production" on mock data would burn the cluster on random tokens.
+        with self.assertRaisesRegex(RuntimeError, "refuses mock data"):
+            _validate_runtime_args(make(mock_data=True))
+        # A correctly declared production run passes.
+        _validate_runtime_args(make())
 
     def test_native_entrypoint_uses_only_pinned_pretrain_keywords(self) -> None:
         tree = ast.parse(
@@ -412,6 +446,82 @@ class RFullProductionDataBlendTests(unittest.TestCase):
         self.assertIn("--mock-data", args)
         self.assertNotIn("--data-path", args)
         self.assertEqual(args[args.index("--split") + 1], "949,50,1")
+
+    def test_default_schedule_is_cosine_with_unit_warmup(self) -> None:
+        # Gates are only a handful of iterations; a real warmup would keep LR at
+        # ~0 for the whole run and the optimizer would never be exercised.
+        args = build_megatron_args(load_config(MINI_CONFIG), data_cache_path="/shared/cache")
+        self.assertEqual(args[args.index("--lr-decay-style") + 1], "cosine")
+        self.assertEqual(args[args.index("--lr-warmup-iters") + 1], "1")
+        self.assertNotIn("--lr-wsd-decay-iters", args)
+
+    def test_warmup_stable_decay_schedule_emits_wsd_flags(self) -> None:
+        config = self._real_data_config()
+        config["training"]["train_iters"] = 254313
+        config["training"]["lr_schedule"] = {
+            "style": "warmup_stable_decay",
+            "warmup_iters": 2543,
+            "decay_iters": 25432,
+            "stable_end_iter": 228881,
+        }
+        args = build_megatron_args(config, data_cache_path="/shared/cache")
+        self.assertEqual(args[args.index("--lr-decay-style") + 1], "WSD")
+        self.assertEqual(args[args.index("--lr-wsd-decay-style") + 1], "cosine")
+        self.assertEqual(args[args.index("--lr-wsd-decay-iters") + 1], "25432")
+        self.assertEqual(args[args.index("--lr-warmup-iters") + 1], "2543")
+        self.assertEqual(args[args.index("--lr-decay-iters") + 1], "254313")
+
+    def test_warmup_stable_decay_rejects_inconsistent_phases(self) -> None:
+        def config_with(**schedule: object) -> dict:
+            config = self._real_data_config()
+            config["training"]["train_iters"] = 254313
+            base = {
+                "style": "warmup_stable_decay",
+                "warmup_iters": 2543,
+                "decay_iters": 25432,
+                "stable_end_iter": 228881,
+            }
+            base.update(schedule)
+            config["training"]["lr_schedule"] = base
+            return config
+
+        # stable_end_iter that disagrees with train_iters - decay_iters means one
+        # of the three numbers is a typo; refuse rather than reshape the run.
+        with self.assertRaises(ConfigError):
+            build_megatron_args(config_with(stable_end_iter=230000),
+                                data_cache_path="/shared/cache")
+        # Phases that do not fit leave no stable phase at all.
+        with self.assertRaises(ConfigError):
+            build_megatron_args(config_with(warmup_iters=240000, stable_end_iter=None),
+                                data_cache_path="/shared/cache")
+        for bad in (0, -1, "2543", None):
+            with self.assertRaises(ConfigError):
+                build_megatron_args(config_with(warmup_iters=bad, stable_end_iter=None),
+                                    data_cache_path="/shared/cache")
+        with self.assertRaises(ConfigError):
+            build_megatron_args(config_with(style="linear"), data_cache_path="/shared/cache")
+
+    def test_rotary_base_comes_from_the_config(self) -> None:
+        # The frozen design pins theta=1e6; MCore's flag defaults to 10000, so a
+        # missing passthrough silently trains the wrong positional encoding.
+        config = self._real_data_config()
+        config["model"]["rotary_base"] = 1000000
+        args = build_megatron_args(config, data_cache_path="/shared/cache")
+        self.assertEqual(args[args.index("--rotary-base") + 1], "1000000")
+        default = build_megatron_args(load_config(MINI_CONFIG), data_cache_path="/shared/cache")
+        self.assertEqual(default[default.index("--rotary-base") + 1], "10000")
+
+    def test_gate_configs_declare_qualification_intent(self) -> None:
+        args = build_megatron_args(load_config(MINI_CONFIG), data_cache_path="/shared/cache")
+        self.assertIn("--rfull-qualification-only", args)
+        self.assertNotIn("--rfull-production-launch", args)
+
+    def test_production_launch_flag_is_opt_in_via_config(self) -> None:
+        config = self._real_data_config()
+        config["production_launch"] = True
+        args = build_megatron_args(config, data_cache_path="/shared/cache")
+        self.assertIn("--rfull-production-launch", args)
+        self.assertNotIn("--rfull-qualification-only", args)
 
     def test_real_blend_emits_weighted_data_path(self) -> None:
         args = build_megatron_args(self._real_data_config(), data_cache_path="/shared/cache")

@@ -37,7 +37,15 @@ def extra_args_provider(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     group.add_argument(
         "--rfull-qualification-only",
         action="store_true",
-        help="Required while launch blockers remain unresolved.",
+        help="Declare a qualification run (gates: tiny geometry and/or mock data).",
+    )
+    group.add_argument(
+        "--rfull-production-launch",
+        action="store_true",
+        help=(
+            "Declare the real production launch. Mutually exclusive with "
+            "--rfull-qualification-only; requires the production profile and real data."
+        ),
     )
     group.add_argument(
         "--rfull-expected-local-parameters",
@@ -49,10 +57,31 @@ def extra_args_provider(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
 
 
 def _validate_runtime_args(args: Any) -> None:
-    if not args.rfull_qualification_only:
+    # Every run must state its intent. The original build hard-blocked production
+    # while launch blockers were open; that block is now an explicit either/or so
+    # a production launch is a deliberate, auditable choice rather than the
+    # default that happens when a flag is forgotten.
+    qualification = args.rfull_qualification_only
+    production = getattr(args, "rfull_production_launch", False)
+    if qualification and production:
         raise RuntimeError(
-            "production launch remains blocked; pass --rfull-qualification-only for Gate 2"
+            "--rfull-qualification-only and --rfull-production-launch are mutually exclusive"
         )
+    if not (qualification or production):
+        raise RuntimeError(
+            "declare run intent: pass --rfull-qualification-only for gates, "
+            "or --rfull-production-launch for the real run"
+        )
+    if production:
+        # Guard the two ways a 'production' run could silently be a toy: the
+        # wrong geometry, or mock data standing in for the corpus.
+        if args.rfull_profile != "production":
+            raise RuntimeError(
+                f"--rfull-production-launch requires the production profile, "
+                f"got {args.rfull_profile!r}"
+            )
+        if getattr(args, "mock_data", False):
+            raise RuntimeError("--rfull-production-launch refuses mock data")
     if args.use_legacy_models:
         raise RuntimeError("R-Full requires the Megatron Core model path")
     if args.transformer_impl != "transformer_engine":
