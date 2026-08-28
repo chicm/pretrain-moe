@@ -35,13 +35,19 @@ cd "$PROJECT_DIR"
 export PYTHONPATH="$MEGATRON_DIR:$PROJECT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "--- stage 0: CPU unit tests ---"
+# tests/ is a package (tests/__init__.py). Note that when a test module fails to
+# import, unittest prints "Ran 1 test ... FAILED (errors=1)", which looks like a
+# real assertion failure but is only an ImportError -- so we echo the tail on
+# failure rather than trusting the summary line.
 cpu_rc=0
 for t in test_rfull_semantics test_rfull_parameter_ledger test_rfull_gate2; do
   echo "  [$t]"
-  if "$PYTHON_BIN" -m unittest "tests.$t" -v 2>&1 | tail -4; then
-    echo "  [$t] PASS"
+  out=$("$PYTHON_BIN" -m unittest "tests.$t" -v 2>&1)
+  if printf '%s\n' "$out" | grep -qE '^OK'; then
+    echo "  [$t] PASS  $(printf '%s\n' "$out" | grep -E '^Ran ' | tail -1)"
   else
     echo "  [$t] FAIL"
+    printf '%s\n' "$out" | tail -20 | sed 's/^/      /'
     cpu_rc=1
   fi
 done
