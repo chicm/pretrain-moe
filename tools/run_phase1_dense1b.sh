@@ -25,14 +25,16 @@ RUN_ROOT=${RUN_ROOT:-$LOCAL/runs}
 RUN_DIR="$RUN_ROOT/$RUN_TAG"
 
 # nnodes comes from the profile; take that many hosts starting at node-0.
-NNODES=$("$PYTHON_BIN" -c "import json,sys;print(json.load(open(sys.argv[1]))['launch']['nnodes'])" "$PROFILE")
+NNODES=$("$PYTHON_BIN" -c "import json,sys;print(json.load(open(sys.argv[1]))['cluster']['nnodes'])" "$PROFILE")
 HOSTS=$(seq -f 'node-%g' 0 $((NNODES - 1)) | paste -sd,)
 
 export HOSTS
 export MASTER_ADDR=node-0                        # pinned; never inferred
 export MASTER_PORT=$(( 29600 + (RANDOM % 300) )) # rotate to dodge TIME_WAIT
 export PYTHON_BIN
-export MEGATRON_DATA_CACHE_PATH="$LOCAL/data-cache/$RUN_TAG"   # local ext4
+export MEGATRON_DATA_CACHE_PATH="$LOCAL/data-cache"   # local ext4, same absolute
+                                                      # path on every node; used
+                                                      # verbatim by the launcher
 
 mkdir -p "$RUN_DIR"
 echo "profile=$PROFILE"
