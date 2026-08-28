@@ -24,15 +24,29 @@ echo "stage: ${#HOSTS[@]} hosts -> $LOCAL"
 
 stage_one() {
   local h="$1"
-  ssh $SSH_OPTS "$h" bash -s <<EOF 2>&1 | sed "s/^/[\$h] /"
+  ssh $SSH_OPTS "$h" bash -s <<EOF 2>&1 | sed "s/^/[$h] /"
 set -euo pipefail
 mkdir -p "$LOCAL"
-rm -rf "$LOCAL/src" "$LOCAL/megatron-lm"
+
+# src is small and changes every push -> always replace.
+rm -rf "$LOCAL/src"
 cp -r "$BLOB_SRC/src-megatron" "$LOCAL/src"
-cp -r "$BLOB_SRC/megatron-lm"  "$LOCAL/megatron-lm"
+
+# megatron-lm is pinned to a single upstream commit and is expensive to copy.
+# Re-copying it also destroys the compiled dataset helpers (.so), which then have
+# to be rebuilt on all 15 nodes. Only copy it when it is missing or incomplete.
+if [[ -f "$LOCAL/megatron-lm/megatron/core/__init__.py" ]]; then
+  mlm_state=kept
+else
+  rm -rf "$LOCAL/megatron-lm"
+  cp -r "$BLOB_SRC/megatron-lm" "$LOCAL/megatron-lm"
+  mlm_state=copied
+fi
+
 test -d "$LOCAL/src/rfull_moe"
 test -d "$LOCAL/megatron-lm/megatron/core"
-echo "\$(hostname) staged src=\$(ls "$LOCAL/src" | wc -l) mlm=\$(ls "$LOCAL/megatron-lm" | wc -l)"
+nso=\$(ls "$LOCAL/megatron-lm/megatron/core/datasets"/*.so 2>/dev/null | wc -l)
+echo "\$(hostname) staged src=\$(ls "$LOCAL/src" | wc -l) mlm=\$(ls "$LOCAL/megatron-lm" | wc -l) mlm_state=\$mlm_state so=\$nso"
 EOF
 }
 
