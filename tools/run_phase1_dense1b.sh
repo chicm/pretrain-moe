@@ -32,9 +32,21 @@ export HOSTS
 export MASTER_ADDR=node-0                        # pinned; never inferred
 export MASTER_PORT=$(( 29600 + (RANDOM % 300) )) # rotate to dodge TIME_WAIT
 export PYTHON_BIN
-export MEGATRON_DATA_CACHE_PATH="$LOCAL/data-cache"   # local ext4, same absolute
-                                                      # path on every node; used
-                                                      # verbatim by the launcher
+# Dataset index cache.
+#
+# Megatron builds the {document,sample,shuffle}_index.npy files on rank 0 ONLY;
+# every other rank waits on a barrier and then opens those files BY PATH. If the
+# path is node-local, the non-builder nodes die with FileNotFoundError while
+# node-0 sits in the barrier -- node-0 looks like the hang but is only the victim.
+#
+# Phase 1 uses mock data, whose indices are small (~1 MB) and are read once at
+# startup rather than mmap'd hot, so the shared blobfuse dir is safe and correct
+# here. For real-data phases the cache is instead pre-built once with
+# tools/prebuild_rfull_data_cache.py and replicated to node-local ext4 via
+# MEGATRON_DATA_CACHE_PATH, because mmap over FUSE faults with an uncatchable
+# SIGSEGV.
+unset MEGATRON_DATA_CACHE_PATH
+export MEGATRON_SHARED_CACHE_ROOT=${MEGATRON_SHARED_CACHE_ROOT:-/scratch/workspaceblobstore/chec/pretrain-moe/smoke-cache}
 
 mkdir -p "$RUN_DIR"
 echo "profile=$PROFILE"
