@@ -285,6 +285,22 @@ def _install_sigusr1_dump() -> str:
     bystander. `faulthandler.register` makes it non-fatal and gives the one
     thing that actually identifies a stall: the current Python frame of every
     thread.
+
+    **This protects workers only.** The torchrun agent
+    (`python -m torch.distributed.run ... pretrain_entry.py ...`) never imports
+    this module, so SIGUSR1 stays fatal for it -- and the training script path
+    appears in the agent's argv, so a probe matching that path selects the agent
+    as well as the workers. Signalling it kills the agent, which tears down all
+    8 local workers; if that agent owns rendezvous (node rank 0) it takes the
+    TCPStore with it and every other node fails with `Broken pipe`.
+
+    Probes must therefore exclude the agent explicitly, e.g.
+
+        pgrep -f '[p]retrain_entry[.]py' | while read pid; do
+            tr '\0' ' ' < /proc/$pid/cmdline | grep -q distributed.run || echo $pid
+        done
+
+    A probe must never be able to change the state of the thing it observes.
     """
     import faulthandler
     import signal

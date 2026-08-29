@@ -118,3 +118,50 @@ def test_ep_group_gets_a_timeout():
                 sys.modules[k] = v
             else:
                 sys.modules.pop(k, None)
+
+
+class TestProbePatternExcludesAgent:
+    """A probe must not be able to kill the thing it observes.
+
+    Incident 2026-08-29: the production 120-GPU run was killed by its own
+    monitoring. `pgrep -f '[p]retrain_(entry|gpt)[.]py'` matched the torchrun
+    *agent* as well as the workers, because the agent's argv contains the
+    training script path. The agent does not import rocm_shim, so SIGUSR1 was
+    still fatal for it; signalling it killed all 8 local workers, and on the
+    rendezvous node it took the TCPStore down, failing all 15 nodes.
+    """
+
+    AGENT_ARGV = (
+        "/opt/venv/bin/python -m torch.distributed.run --nnodes=15 "
+        "--node-rank=0 --master-addr=node-0 --master-port=29934 "
+        "/scratch/rfull/moe/tools/pretrain_entry.py --num-layers 48"
+    )
+    WORKER_ARGV = (
+        "/opt/venv/bin/python -u /scratch/rfull/moe/tools/pretrain_entry.py "
+        "--num-layers 48"
+    )
+
+    def test_naive_pattern_matches_agent_too(self):
+        """Document why the obvious pattern is unsafe."""
+        import re
+
+        naive = re.compile(r"pretrain_(entry|gpt)[.]py")
+        assert naive.search(self.AGENT_ARGV), "agent argv contains script path"
+        assert naive.search(self.WORKER_ARGV)
+
+    def test_agent_is_excluded_by_distributed_run_check(self):
+        """The safe rule: drop any match whose argv has 'distributed.run'."""
+
+        def is_worker(argv: str) -> bool:
+            return "pretrain_entry.py" in argv and "distributed.run" not in argv
+
+        assert not is_worker(self.AGENT_ARGV), "agent must be excluded"
+        assert is_worker(self.WORKER_ARGV), "worker must be kept"
+
+    def test_shim_documents_the_hazard(self):
+        """The docstring must keep warning about the agent."""
+        from moe_rebuild import rocm_shim
+
+        doc = rocm_shim._install_sigusr1_dump.__doc__ or ""
+        assert "distributed.run" in doc
+        assert "agent" in doc.lower()
