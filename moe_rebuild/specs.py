@@ -210,6 +210,20 @@ def moe_prod_smoke(nnodes: int = 15, train_iters: int = 30) -> RunSpec:
     return spec
 
 
+
+def moe_bisect_15n(num_layers: int = 4, train_iters: int = 25) -> RunSpec:
+    """Production topology at reduced depth, to isolate per-layer cost.
+
+    Everything except `num_layers` matches `moe_prod_smoke`, so a comparison
+    between depths changes exactly one variable.
+    """
+    spec = moe_prod_smoke(nnodes=15, train_iters=train_iters)
+    spec.run_id = f"bisect_{num_layers}L"
+    spec.model.num_layers = num_layers
+    spec.model.moe_layer_freq = f"[0]*2+[1]*{num_layers - 2}"
+    spec.schedule.lr_warmup_iters = 2
+    return spec
+
 REGISTRY = {
     "dense_1b_1n": lambda: dense_1b(1),
     "dense_1b_2n": lambda: dense_1b(2),
@@ -218,4 +232,6 @@ REGISTRY = {
     "moe_full_1n": moe_1node_full,
     "moe_smoke_15n": moe_prod_smoke,
     "moe_prod_15n": rfull_moe_prod,
+    "moe_bisect_4L": lambda: moe_bisect_15n(4, 25),
+    "moe_bisect_12L": lambda: moe_bisect_15n(12, 25),
 }

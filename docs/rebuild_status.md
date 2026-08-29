@@ -210,3 +210,76 @@ depth is not a memory test for the 120-GPU config.**
 - `find /` to locate a binary walked the 3.8 TiB blobfuse mount and returned
   nothing useful. Ask `pip show -f` instead of searching a tree with a FUSE
   mount in it.
+
+
+---
+
+## Phase 3 — 120-GPU MoE: current state (open)
+
+The production MoE **runs** on 120 GPUs, but per-iteration time is erratic and
+the run does not yet hold a steady throughput. This section records what is
+established, so the next session does not re-derive it.
+
+### Established by measurement
+
+| finding | evidence |
+|---|---|
+| Model builds and fits at 120 GPUs | 4.586 B params/rank (design doc says 4.59 B); peak 82 GiB of 192 GiB at mbs=1 |
+| EP topology is optimal | order `tp-cp-ep-dp-pp`, TP=CP=1 → EP group = ranks 0–7 = one node (xGMI, not IB) |
+| Not a data-loading problem | aggregate `rchar` delta = **0 MiB/s** during a stall; 0 processes in FUSE wait |
+| Not a compile problem | Triton cache static (419 → 419 files); load 17 of 96 cores |
+| Not the DP collective | 8.5 GiB reduce-scatter ≈ 3 s at IB speed, and `--overlap-grad-reduce` is on |
+| Not the optimizer | `optimizer` timer = **49 ms** |
+| Not expert imbalance | all 15 nodes identical: 42 % GPU, ~2 cores, no laggard |
+| No watchdogs, no divergence | all 120 ranks aligned on the same frame |
+
+### Root cause found and fixed: timers insert global barriers
+
+`--timing-log-level 1` was added to get a phase breakdown. Megatron passes
+`barrier=True` for several timers, and `Timer.start` then calls
+`torch.distributed.barrier()` + `torch.cuda.synchronize()`
+(`core/timers.py:135`). At level 0 these are `DummyTimer` no-ops; at level ≥ 1
+they become real global sync points across all 120 ranks and destroy
+compute/communication overlap.
+
+With timers **on**, 4 layers never completed an iteration.
+With timers **off**, the same config produced `it1 = 50.7 s`, `it2 = 10.0 s`.
+
+**Never leave `--timing-log-level ≥ 1` on for a production run.** Use it only
+for a short, deliberate profiling run, and read the numbers knowing they are
+inflated by the barriers they introduce.
+
+### Still open: erratic iteration time
+
+Even with timers off, the 4-layer run went `50.7 s → 10.0 s → >9 min`. During
+the long iteration:
+
+* every rank is pinned at `moe_utils.py:296 permute`
+  (`tokens.index_select(0, sorted_indices)`), reached via
+  `token_dispatcher.py:499 token_permutation`;
+* GPUs sit at **21 %** (busy, but far from saturated);
+* the same `permute` call benchmarks at **0.19 ms** in isolation at production
+  shapes — about 0.1 s per iteration in total.
+
+A Python frame that is 0.19 ms in isolation but blocks for minutes in situ is
+almost certainly **not** the real consumer: it is the first synchronising point
+after a large amount of queued asynchronous GPU work. The dispatcher calls
+`_maybe_dtoh_and_synchronize` immediately before this line, which forces a
+device-to-host copy of `tokens_per_expert` — the natural place for previously
+queued work to come due.
+
+**Next step:** attribute the queued work with a GPU-side profile
+(`rocprofv3 --kernel-trace` on one rank for a few iterations, or
+`torch.profiler` with `activities=[CUDA]` limited to 2 iterations), rather than
+inferring from Python frames. The Python stack has now been sampled repeatedly
+and always points at the same synchronisation boundary, which is exactly what
+that boundary would look like regardless of the true cause.
+
+### Deliberately reverted
+
+* `--recompute-granularity selective` — added for an OOM whose real cause was
+  `mbs=8`; with mbs=1 peak is 82 GiB, so it was removed as an extra variable.
+  A controlled A/B (recompute on vs off, all else equal) showed no difference
+  in the stall.
+* `micro_batch_size=8` — 2.9× better grouped-GEMM throughput, but needs
+  ~160 GiB of activations at DP=120 and OOMs. Memory is the binding constraint.

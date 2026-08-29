@@ -272,11 +272,15 @@ def build_argv(spec: RunSpec) -> list[str]:
     a += ["--eval-iters", str(s.eval_iters)]
     a += ["--log-interval", str(s.log_interval)]
     a += ["--log-throughput"]
-    # Level 1 prints the forward/backward/optimizer/communication split.
-    # Without it a slow run gives no evidence at all about WHERE the time
-    # goes, and every diagnosis becomes a guess. The overhead is a few
-    # synchronisations per iteration.
-    a += ["--timing-log-level", "1"]
+    # Keep timers OFF in production. Megatron's timers take `barrier=True`
+    # in several hot paths (training.py:744/758/1650, and the ones
+    # finalize_model_grads starts), and `Timer.start` then does
+    # `torch.distributed.barrier()` + `torch.cuda.synchronize()`
+    # (core/timers.py:135). At log-level 0 those become DummyTimer no-ops;
+    # at level >=1 they become real global sync points that serialise all
+    # 120 ranks and destroy compute/communication overlap.
+    # Raise this only for a short, deliberate profiling run.
+    a += ["--timing-log-level", "0"]
     # 30 min is not enough: iteration 1 alone takes ~16 min of kernel
     # autotune on ROCm, and a slow checkpoint write can add more.
     a += ["--distributed-timeout-minutes", "120"]
