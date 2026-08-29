@@ -214,11 +214,26 @@ depth is not a memory test for the 120-GPU config.**
 
 ---
 
-## Phase 3 — 120-GPU MoE: current state (open)
+## Phase 3 — 120-GPU MoE  ✅ TRAINING
 
-The production MoE **runs** on 120 GPUs, but per-iteration time is erratic and
-the run does not yet hold a steady throughput. This section records what is
-established, so the next session does not re-derive it.
+Production launched: `rfull_moe_prod_0829_174026`, 15 nodes / 120 GPUs,
+4 585 502 720 params per rank (design doc: 4.59 B), peak **82 GiB of 192 GiB**.
+
+Verified at 4 layers on the production topology before scaling up
+(`bisect_4L_0829_172043`, 120 GPUs):
+
+| iteration | 1 | 2 | 3 | … | 15 |
+|---|---|---|---|---|---|
+| lm loss | 12.33 | 11.52 | 10.90 | … | **7.97** |
+
+Loss decreases monotonically, 0 NaN, 0 skipped. Best iteration 3.2 s
+(36.6 TFLOP/s/GPU); iteration time is still variable (3–83 s), which is a
+throughput question, not a correctness one.
+
+### Two throughput defects found by bisection
+
+Both were *my* configuration choices, not Megatron bugs, and both were found by
+reducing the model to 4 layers and changing one variable at a time.
 
 ### Established by measurement
 
@@ -283,3 +298,76 @@ that boundary would look like regardless of the true cause.
   in the stall.
 * `micro_batch_size=8` — 2.9× better grouped-GEMM throughput, but needs
   ~160 GiB of activations at DP=120 and OOMs. Memory is the binding constraint.
+
+
+### GPU-side attribution (torch.profiler, 1 production MoE layer, EP8, fwd+bwd)
+
+Self CUDA time total **64.4 ms for 3 iterations = 21.5 ms/layer**, matching the
+isolated benchmark. Where it goes:
+
+| item | CUDA time | share |
+|---|---|---|
+| `ncclDevKernel_Generic` | 15.3 ms | 23.7 % |
+| `_GroupedLinearBackward` | 14.8 ms | 23.0 % |
+| `nccl:all_to_all` (18 calls, 786 µs each) | 14.1 ms | 22.0 % |
+| `_GroupedLinear` | 9.2 ms | 14.3 % |
+| `FusedAttnFuncBackward` | 8.5 ms | 13.2 % |
+
+**~45 % of GPU time is RCCL**, even though EP=8 keeps the alltoall inside a
+single node. The expert GEMMs are only ~37 %. This is the structural cost of
+dropless alltoall MoE at 12 experts/rank with ~256 tokens per expert, and it
+bounds what any tuning can achieve at this geometry.
+
+Note the profile also shows `FusedAttnFunc` / `ck_tile FmhaBwd` kernels: in a
+bare microbenchmark TE picks its own backend, whereas the training runs force
+`--attention-backend flash`. The two are not directly comparable.
+
+
+### Defect: `--moe-per-layer-logging` with `--log-interval 1`
+
+The flag makes `track_moe_metrics` all-reduce the aux-loss tracker **per MoE
+layer**, so at `--log-interval 1` every layer adds a collective on every step.
+
+| config | result at 4 layers / 120 GPUs |
+|---|---|
+| per-layer logging ON | 2 iterations in ~20 min, then stalls of 4–10 min |
+| per-layer logging OFF | 15 iterations in ~9 min, loss 12.33 → 7.97 |
+
+Removed from the default path. Enable only for a short diagnostic run.
+
+### Defect: `--timing-log-level 1`
+
+Megatron passes `barrier=True` for timers on hot paths, and `Timer.start` then
+calls `torch.distributed.barrier()` + `torch.cuda.synchronize()`
+(`core/timers.py:135`). At level 0 these are `DummyTimer` no-ops; at level ≥ 1
+they become global sync points across all 120 ranks.
+
+With timers **on**, 4 layers never completed an iteration. With timers **off**,
+the same config gave `it1 = 50.7 s`, `it2 = 10.0 s`.
+
+Ironic and worth remembering: **the instrumentation added to find the slowness
+was itself a large part of the slowness.** Profile with a short, deliberate run
+and read the numbers knowing the barriers inflate them.
+
+### Ruled out by measurement (do not re-investigate)
+
+| hypothesis | evidence against |
+|---|---|
+| Data loading over blobfuse | aggregate `rchar` = **0 MiB/s** during stalls; 0 procs in FUSE wait |
+| torch.compile / Triton JIT | Triton cache static (419 → 419 files); load 17 of 96 cores |
+| DP gradient collective | 8.5 GiB reduce-scatter ≈ 3 s; `--overlap-grad-reduce` on |
+| Optimizer step | `optimizer` timer = **49 ms** |
+| Expert imbalance / a slow node | all 15 nodes identical: 42 % GPU, ~2 cores, no laggard |
+| EP alltoall crossing nodes | order `tp-cp-ep-dp-pp`, TP=CP=1 → EP group = ranks 0–7 = one node |
+| Dropless variable shapes re-tuning | fixed shapes 2.4 ms vs variable 2.4 ms — identical |
+| Activation recompute | A/B with all else equal showed no difference |
+| `check_grads` NaN scan | disabled via `--no-check-for-nan-in-loss-and-grad`; stall persisted until the logging fix |
+
+### Remaining work
+
+Iteration time still varies 3–83 s. The GPU profile shows ~45 % of layer time
+in RCCL (`ncclDevKernel_Generic` 23.7 %, `nccl:all_to_all` 22.0 %) against
+~37 % in the expert GEMMs, so the alltoall is the structural ceiling at this
+geometry. Next step is a `rocprofv3 --kernel-trace` on one rank across several
+iterations to see whether the slow iterations differ in kernel mix or purely in
+collective wait time.

@@ -199,7 +199,11 @@ def build_argv(spec: RunSpec) -> list[str]:
         a += ["--moe-token-dispatcher-type", "alltoall"]
         a += ["--moe-grouped-gemm"]
         # Dropless: no --moe-expert-capacity-factor, no pad-to-capacity.
-        a += ["--moe-per-layer-logging"]
+        # NOTE: --moe-per-layer-logging is deliberately OFF.
+        # It calls track_moe_metrics, which does a per-layer all-reduce of
+        # the aux-loss tracker. Combined with --log-interval 1 that is one
+        # extra collective per MoE layer per step. Enable it only for a
+        # short diagnostic run, and expect it to cost throughput.
         # NOTE: no activation recompute.
         # It was added to fix an OOM that turned out to be caused by
         # micro_batch_size=8 (32768 tokens in flight, ~160 GiB of activations).
@@ -228,6 +232,24 @@ def build_argv(spec: RunSpec) -> list[str]:
     a += ["--bf16"]
     a += ["--accumulate-allreduce-grads-in-fp32"]
     a += ["--use-distributed-optimizer"]
+    # Disable the per-bucket NaN/Inf grad check.
+    #
+    # `_ParamAndGradBuffer.check_grads` (param_and_grad_buffer.py:155) loops over
+    # every bucket, computes `bucket.grad_data.norm(p=2)`, and hands each result
+    # to `RerunStateMachine.validate_result`, which forces a device-to-host
+    # synchronisation. A dense model has a handful of buckets; this MoE has one
+    # per expert shard, so the loop becomes thousands of tiny norm+sync pairs
+    # that serialise the whole backward pass.
+    #
+    # Measured at 4 layers on 120 GPUs: iterations ran 37.2 s, 4.1 s, then
+    # **234.0 s** (0.5 TFLOP/s/GPU), with every rank parked in
+    # `check_grads -> validate_result` and GPUs at 21%.
+    #
+    # Loss scaling is not in play (bf16, loss scale fixed at 1.0), and grad
+    # clipping still computes a global grad norm every step -- a NaN would show
+    # up there as `grad norm: nan` and in the reported loss. So the safety net
+    # this removes is redundant, while its cost is not.
+    a += ["--no-check-for-nan-in-loss-and-grad"]
 
     # ---- tokenizer / vocab ----------------------------------------------
     # NullTokenizer: ids are already in the .bin; it only needs a vocab size and
