@@ -45,7 +45,12 @@ fi
 
 test -d "$LOCAL/src/rfull_moe"
 test -d "$LOCAL/megatron-lm/megatron/core"
-nso=\$(ls "$LOCAL/megatron-lm/megatron/core/datasets"/*.so 2>/dev/null | wc -l)
+# NOTE: do not use \`ls *.so | wc -l\` here. Under \`set -euo pipefail\`, a glob that
+# matches nothing makes ls exit 2, pipefail propagates that through the pipe, and
+# set -e kills this script one line before the success echo -- staging looks like
+# it failed on a fresh cluster where no helpers have been built yet. find returns
+# 0 for "no matches", so it is safe.
+nso=\$(find "$LOCAL/megatron-lm/megatron/core/datasets" -maxdepth 1 -name '*.so' 2>/dev/null | wc -l)
 echo "\$(hostname) staged src=\$(ls "$LOCAL/src" | wc -l) mlm=\$(ls "$LOCAL/megatron-lm" | wc -l) mlm_state=\$mlm_state so=\$nso"
 EOF
 }
@@ -57,12 +62,15 @@ for h in "${HOSTS[@]}"; do
 done
 
 rc=0
-for p in "${pids[@]}"; do
-  wait "$p" || rc=1
+failed=()
+for i in "${!pids[@]}"; do
+  # Report WHICH host failed. An aggregate "at least one host failed" hides the
+  # 14-good/1-bad asymmetry that is the usual shape of cluster problems.
+  wait "${pids[$i]}" || { rc=1; failed+=("${HOSTS[$i]}"); }
 done
 
 if [[ $rc -ne 0 ]]; then
-  echo "FAIL: at least one host failed to stage" >&2
+  echo "FAIL: staging failed on: ${failed[*]}" >&2
   exit 1
 fi
 echo "STAGE OK"
