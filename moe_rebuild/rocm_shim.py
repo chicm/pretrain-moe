@@ -175,6 +175,10 @@ def apply() -> list[str]:
 
         applied.append(_install_ep_group_timeout_fix())
 
+        note = _install_write_item_arity_fix()
+        if note:
+            applied.append(note)
+
         import megatron.legacy.fused_kernels as fused_kernels
 
         if fused_kernels.load is not _noop_load:
@@ -191,6 +195,88 @@ def apply() -> list[str]:
         applied.append(_install_cache_only_exit())
 
     return applied
+
+
+def _install_write_item_arity_fix() -> str | None:
+    """Reconcile torch's ``_write_item`` signature with MCore's call site.
+
+    torch 2.10-dev added a 6th positional parameter, ``serialization_format``,
+    to ``torch.distributed.checkpoint.filesystem._write_item``. MCore 0.12.4's
+    ``filesystem_async.py`` still calls it with five, inside a checkpoint
+    *worker process*, so every save raises::
+
+        TypeError: _write_item() missing 1 required positional argument:
+                   'serialization_format'
+
+    The worker's exception is re-raised on the main rank as
+    ``RuntimeError: Worker failure: ...`` from ``retrieve_write_results()``.
+    That killed the 120-GPU run at iteration 2000 after 2000 good iterations:
+    rank 1 exited 1, the other 119 blocked forever in the ``gather_object``
+    that collects write results, and the NCCL watchdog aborted everything two
+    hours later.
+
+    The fix binds the new argument to its default so the old 5-argument call
+    keeps working. MCore imports the symbol by value
+    (``from ... import _write_item``), so patching torch's module attribute is
+    not enough -- the already-imported reference in ``filesystem_async`` has to
+    be replaced too.
+    """
+    import inspect
+
+    try:
+        from torch.distributed.checkpoint import filesystem as tfs
+    except Exception:
+        return None
+
+    fn = getattr(tfs, "_write_item", None)
+    if fn is None:
+        return None
+
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return None
+
+    if not params or params[-1].name != "serialization_format":
+        return None  # older torch: MCore's 5-argument call is already correct.
+
+    if params[-1].default is not inspect.Parameter.empty:
+        return None  # already optional, nothing to do.
+
+    try:
+        fmt = tfs.SerializationFormat.TORCH_SAVE
+    except AttributeError:
+        return None
+
+    def _write_item_compat(*args, **kwargs):
+        if len(args) == 5 and "serialization_format" not in kwargs:
+            args = (*args, fmt)
+        return fn(*args, **kwargs)
+
+    _write_item_compat.__name__ = "_write_item"
+    _write_item_compat.__doc__ = fn.__doc__
+    tfs._write_item = _write_item_compat
+
+    patched = ["torch.distributed.checkpoint.filesystem"]
+
+    # MCore did `from ... import _write_item`, so it holds its own reference.
+    try:
+        from megatron.core.dist_checkpointing.strategies import (
+            filesystem_async as mfa,
+        )
+
+        if getattr(mfa, "_write_item", None) is fn:
+            mfa._write_item = _write_item_compat
+            patched.append("megatron...strategies.filesystem_async")
+    except Exception:
+        pass
+
+    return (
+        "_write_item(serialization_format=TORCH_SAVE) default bound in "
+        + " + ".join(patched)
+        + " (torch 2.10-dev added a 6th arg; MCore 0.12.4 passes 5, "
+        "which breaks every torch_dist checkpoint save)"
+    )
 
 
 def _install_cache_only_exit() -> str:

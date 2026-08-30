@@ -154,6 +154,29 @@ class Schedule:
     weight_decay: float = 0.1
     clip_grad: float = 1.0
     save_interval: int = 2000
+
+    # "torch", not "torch_dist".
+    #
+    # torch_dist runs its writes through MCore's async subsystem
+    # (dist_checkpointing/strategies/async_utils.py), which is broken against
+    # this torch build in two independent ways:
+    #
+    #   1. torch 2.10-dev added a 6th parameter to filesystem._write_item;
+    #      MCore 0.12.4 passes 5, so every write raises TypeError inside the
+    #      checkpoint worker (see the rocm_shim fix for this).
+    #   2. Even with that shimmed, the worker never rejoins: rank 0 blocks in
+    #      process.join() (async_utils.py:248) with no worker process alive,
+    #      while the other 119 ranks block in the gather_object that collects
+    #      write results. Zero bytes are written.
+    #
+    # The plain "torch" format takes the non-async path
+    # (checkpointing.py:398,957) and avoids the whole subsystem.
+    ckpt_format: str = "torch"
+
+    # Fully-parallel checkpoint save. OFF because its cross-rank plan
+    # negotiation hung at iteration 2000 on 120 ranks and cost the whole run.
+    # Switchable so it can be retested.
+    ckpt_fully_parallel_save: bool = False
     eval_interval: int = 1000
     eval_iters: int = 10
     log_interval: int = 1
@@ -170,7 +193,10 @@ class RunSpec:
     save: str | None = None
     load: str | None = None
     tensorboard_dir: str | None = None
-    distributed_timeout_minutes: int = 120
+    # 20 minutes, not 120. Steady-state iterations take ~10 s, so anything
+    # past 20 minutes is dead, and the checkpoint hang at iteration 2000 cost
+    # two full hours of 120 idle GPUs before the watchdog fired.
+    distributed_timeout_minutes: int = 20
     # ZeRO-1: shards optimizer state across the DP group, so the step becomes
     # a reduce-scatter + per-shard update + all-gather over all DP ranks.
     # Kept on for production (it is what makes 4.59 B params/rank fit), but
@@ -355,7 +381,17 @@ def build_argv(spec: RunSpec) -> list[str]:
     # ---- checkpoint / logging -------------------------------------------
     if spec.save:
         a += ["--save", spec.save, "--save-interval", str(s.save_interval)]
-        a += ["--ckpt-format", "torch_dist"]
+        a += ["--ckpt-format", s.ckpt_format]
+        # Fully-parallel save negotiates a save plan across all 120 ranks
+        # before any bytes are written. At iteration 2000 that negotiation
+        # hung inside dist_checkpointing/strategies/fully_parallel.py:118 and
+        # never returned; 120 minutes later the NCCL watchdog SIGABRTed every
+        # rank, destroying 2000 good iterations.
+        #
+        # It is not an IO problem: blobfuse writes at 658 MB/s with 12 TB free.
+        # The hang is in the collective, before the write.
+        if not s.ckpt_fully_parallel_save:
+            a += ["--no-ckpt-fully-parallel-save"]
     if spec.load:
         a += ["--load", spec.load]
     a += ["--eval-interval", str(s.eval_interval)]

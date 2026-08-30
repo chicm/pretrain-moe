@@ -10,6 +10,8 @@ docs/r_full_moe_production_training_design.md section 11.4.
 
 from __future__ import annotations
 
+import time
+
 from .config import (
     CKPT_ROOT,
     Model,
@@ -215,6 +217,23 @@ def moe_prod_smoke(nnodes: int = 15, train_iters: int = 30) -> RunSpec:
 
 
 
+def _ckpt_test(spec: RunSpec) -> RunSpec:
+    """Save at iteration 20 so the checkpoint path is verified cheaply."""
+    spec.run_id = spec.run_id + "_ckpttest"
+    spec.schedule.save_interval = 20
+    spec.schedule.train_iters = 40
+    spec.timeout_min = 30
+    # save/load were derived from the base run_id, so they still point at the
+    # production checkpoint directory. Repoint them, and give each launch a
+    # unique directory: blobfuse caches negative/positive lookups per node, so
+    # a file deleted from node-14 is still visible to the other 14 nodes and
+    # ranks then try to load a checkpoint that no longer exists.
+    stamp = time.strftime("%m%d_%H%M%S")
+    spec.save = f"{CKPT_ROOT}/{spec.run_id}_{stamp}"
+    spec.load = spec.save
+    return spec
+
+
 def _dispatcher(spec: RunSpec, kind: str) -> RunSpec:
     """Swap the MoE token dispatcher (alltoall <-> allgather)."""
     spec.run_id = spec.run_id + "_" + kind
@@ -302,6 +321,10 @@ REGISTRY = {
     "moe_full_1n": moe_1node_full,
     "moe_smoke_15n": moe_prod_smoke,
     "moe_prod_15n": rfull_moe_prod,
+    # Same 120-rank production geometry but saves at iteration 20 instead of
+    # 2000, so the checkpoint path is exercised in ~10 minutes rather than
+    # 5.5 hours. Iteration 2000 hung in fully-parallel save and cost the run.
+    "moe_prod_15n_ckpttest": lambda: _ckpt_test(rfull_moe_prod()),
     # Single-node variants. EP=8 fits inside one node, so these keep the
     # expert-parallel dimension identical to production and change only the
     # data-parallel width (DP=8 instead of DP=120). That isolates "is the

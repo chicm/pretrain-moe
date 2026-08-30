@@ -811,3 +811,67 @@ restarted while `trainers still up: 41`.
 Megatron writes them from node-14, not node-0, and `/scratch` is node-local, so
 the server has to run on node-14. `ls -la <run>/tensorboard/` across nodes
 finds the owner.
+
+
+## Checkpoint save: two more version-skew bugs
+
+The first production run died at iteration 2000 -- **during the checkpoint
+save**, after 2000 clean iterations (loss 12.333 -> 8.66). The save hung for
+exactly the 120-minute distributed timeout and the NCCL watchdog then SIGABRTed
+all 120 ranks. Two separate defects, both from torch/MCore version skew.
+
+### Bug 1: `_write_item` arity
+
+```
+TypeError: _write_item() missing 1 required positional argument:
+           'serialization_format'
+```
+
+torch 2.10-dev's `filesystem._write_item` takes 6 parameters; MCore 0.12.4's
+`filesystem_async.py:189` passes 5. It raises inside the checkpoint *worker
+process*, so rank 1 exited 1 while the other 119 blocked forever in the
+`gather_object` that collects write results -- the classic victim/cause split.
+
+Fixed in `rocm_shim.py` (Megatron stays pristine) by binding the new argument
+to `SerializationFormat.TORCH_SAVE`. The shim patches both torch's module
+attribute *and* MCore's already-imported reference, since MCore did
+`from ... import _write_item`. Five unit tests cover it.
+
+### Bug 2: the async worker never rejoins
+
+With the arity fixed, the save still hung -- but differently:
+
+- rank 0 in `async_utils.py:248 process.join()`, with **no checkpoint worker
+  process alive**
+- the other ranks in `gather_object`
+- **zero bytes written**
+
+The whole `torch_dist` async subsystem is unusable on this build, so the fix is
+to avoid it: **`--ckpt-format torch`** takes the non-async path
+(`checkpointing.py:398`) and supports the distributed optimizer via a separate
+`distrib_optim.pt` (`checkpointing.py:1399`).
+
+### Verified
+
+`moe_prod_15n_ckpttest` saves at iteration 20 instead of 2000, so the
+checkpoint path is exercised in ~10 minutes rather than 5.5 hours:
+
+| check | result |
+|---|---|
+| save completed | **yes**, 21:27:34 -> 21:32:36 = **302 s** |
+| size | **357.31 GB**, 17 files, 15 `mp_rank_*` directories |
+| `latest_checkpointed_iteration.txt` | **20** |
+| training resumed after save | yes, ran to **40/40** |
+| step time either side | 10.06 s (it20) / 10.00 s (it21) -- unaffected |
+
+### Blobfuse cache is not coherent across nodes
+
+Deleting a stale checkpoint from node-14 left it visible on the other 14, so
+ranks kept trying to load a checkpoint that no longer existed and died at
+startup. Deleting from all 15 nodes individually still did not converge.
+
+The fix is to not fight it: `_ckpt_test` now stamps a unique save/load
+directory per launch. It also has to repoint `save`/`load` explicitly, because
+those are derived from `run_id` *before* the modifier appends its suffix -- so
+without it the test was reading and writing the production checkpoint
+directory.
