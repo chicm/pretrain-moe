@@ -44,8 +44,13 @@ def test_moe_mini_flags():
     assert val(a, "--moe-router-topk") == "6"
     assert val(a, "--moe-router-dtype") == "fp32"
     assert "--moe-grouped-gemm" in a
-    # dropless: capacity factor must NOT be set
+    # Dropless: no capacity factor, no padding.
+    #
+    # A fixed capacity was tried against the 120-GPU stall and refuted by a
+    # controlled 12-layer rerun (iteration 1 in 252 s without it; nothing in
+    # 10 min with it). Keep dropless until evidence says otherwise.
     assert "--moe-expert-capacity-factor" not in a
+    assert "--moe-pad-expert-input-to-capacity" not in a
 
 
 def test_moe_layer_freq_counts_match_layers():

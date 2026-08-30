@@ -416,3 +416,51 @@ instead of sampling more Python stacks.
 env-block arm "stuck -- 12 procs, zero output" and was about to conclude the
 env block caused the stall. It finished in 15.7 s; I had polled too early.
 Both arms passed. Poll until the process exits, then read the result.
+
+
+## Three fixes tried against the stall, all refuted (2026-08-30)
+
+Each was plausible, each was reverted, and the reverts matter more than the
+attempts: two of them made things measurably worse.
+
+| change | theory | result |
+|---|---|---|
+| `--moe-expert-capacity-factor 1.25` + `--moe-pad-expert-input-to-capacity` | dropless routing varies the grouped-GEMM shape every step, so ROCm re-picks hipBLASLt heuristics per shape | 36 layers: still 0 iterations at T+14 min, `cu_occ=0` |
+| `--ddp-bucket-size 200M` + `--overlap-grad-reduce` | one unbucketed ~8.5 GiB reduce-scatter after backward, cost scaling with depth | see below |
+| both together | - | **regression**: 12 layers reached iteration 1 in 252 s without them, and produced nothing in 10 min with them |
+
+The 12-layer control is the important measurement. It is the configuration
+known to work, so running it with the new flags isolated their effect --
+and they were harmful, not neutral. Reverted; a rerun then reproduced
+iteration 1 at **233 s** (baseline 252 s), confirming the revert restored the
+prior behaviour rather than merely appearing to.
+
+**Process failure worth naming:** I changed three things at once (capacity
+factor, DDP bucketing, TensorBoard) and launched at 36 layers, where a single
+attempt costs ~15 minutes. When it failed I could not attribute the failure to
+any one change. The fix was to go back to the cheap 12-layer control and change
+one variable. That is the same lesson as the earlier `--timing-log-level`
+episode, and I did not apply it the second time.
+
+### Current state, stated honestly
+
+- The stall is **not** explained. It is present in the original configuration
+  too: 12 layers reaches iteration 1, then iteration 2 has not appeared after
+  4 minutes.
+- It is **not** a bad node, the interconnect, the EP alltoall, the env block,
+  grad-norm, DDP bucketing, or expert capacity -- each ruled out by direct
+  measurement (see the table above and the previous section).
+- It scales with depth: 4 layers stalls intermittently and recovers, 12 layers
+  stalls after iteration 1, 36 and 48 layers have never produced an iteration.
+- During a stall, **CU occupancy is 0 on every GPU on every node** while power
+  sits flat at 248-268 W and `rocm-smi --showuse` reports 100 %. No kernel is
+  running anywhere; every rank is waiting.
+
+### Next step
+
+Get GPU-side attribution rather than more Python stacks. `rocprofv3` is not on
+PATH; find it in the ROCm install or use `torch.profiler` with
+`ProfilerActivity.CUDA` around iterations 1-3 on one rank, dumping a trace on
+first stall. The question to answer is which collective is outstanding when
+occupancy hits zero -- the Python frame has pointed at three different
+synchronisation points so far, and none of them was the cost.

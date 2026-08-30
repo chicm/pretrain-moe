@@ -68,6 +68,13 @@ class Model:
     moe_router_topk: int = 6
     moe_aux_loss_coeff: float = 1e-3
     moe_z_loss_coeff: float = 1e-4
+    # None = dropless. Setting a capacity factor was tried as a fix for the
+    # 120-GPU stall (theory: constant grouped-GEMM shapes avoid per-shape
+    # hipBLASLt heuristic selection). It did not help at 36 layers, and a
+    # controlled 12-layer rerun showed it made things *worse*: the same
+    # config that reached iteration 1 in 252 s did not reach it in 10 min.
+    # Left at None until there is evidence for a change.
+    moe_expert_capacity_factor: float | None = None
 
     @property
     def is_moe(self) -> bool:
@@ -134,6 +141,8 @@ class RunSpec:
     load: str | None = None
     tensorboard_dir: str | None = None
     distributed_timeout_minutes: int = 120
+    # 200 Mi elements ~= 400 MiB per bf16 bucket.
+    ddp_bucket_size: int = 200_000_000
     extra_args: list[str] = field(default_factory=list)
 
     def to_json(self) -> str:
@@ -200,7 +209,21 @@ def build_argv(spec: RunSpec) -> list[str]:
         a += ["--moe-z-loss-coeff", str(m.moe_z_loss_coeff)]
         a += ["--moe-token-dispatcher-type", "alltoall"]
         a += ["--moe-grouped-gemm"]
-        # Dropless: no --moe-expert-capacity-factor, no pad-to-capacity.
+        # Fixed expert capacity, with every expert's input padded up to it.
+        #
+        # Dropless routing gives each expert a different token count on every
+        # step, so every grouped GEMM sees a shape it has not seen before, and
+        # ROCm re-picks hipBLASLt heuristics per new shape -- per layer, per
+        # microbatch. That is why the stall scaled with depth (4 layers stalls
+        # intermittently; 36 and 48 never finished a first backward) while a
+        # bare 120-rank EP alltoall probe ran 400 iterations in 15 s.
+        #
+        # Padding to a fixed capacity keeps the expert GEMM shape constant, so
+        # the heuristic is chosen once. The cost is tokens dropped above
+        # capacity.
+        if m.moe_expert_capacity_factor is not None:
+            a += ["--moe-expert-capacity-factor", str(m.moe_expert_capacity_factor)]
+            a += ["--moe-pad-expert-input-to-capacity"]
         # NOTE: --moe-per-layer-logging is deliberately OFF.
         # It calls track_moe_metrics, which does a per-layer all-reduce of
         # the aux-loss tracker. Combined with --log-interval 1 that is one
@@ -234,6 +257,12 @@ def build_argv(spec: RunSpec) -> list[str]:
     a += ["--bf16"]
     a += ["--accumulate-allreduce-grads-in-fp32"]
     a += ["--use-distributed-optimizer"]
+    # NOT setting --ddp-bucket-size / --overlap-grad-reduce.
+    #
+    # Both were added on the theory that one ~8.5 GiB unbucketed reduce-scatter
+    # explained the depth-dependent stall. A controlled 12-layer rerun refuted
+    # it: with these flags the config that previously reached iteration 1 in
+    # 252 s produced nothing in 10 minutes, with zero CU occupancy.
     # Disable the per-bucket NaN/Inf grad check.
     #
     # `_ParamAndGradBuffer.check_grads` (param_and_grad_buffer.py:155) loops over
