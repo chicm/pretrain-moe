@@ -42,12 +42,26 @@ def build_tar() -> bytes:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--nnodes", type=int, default=15)
+    ap.add_argument(
+        "--b64-out",
+        default=str(Path.home() / ".deeporca/agents/pretrain/files/_deploy.b64"),
+        help="where to write the base64 tarball that _deploy.py reads")
     args = ap.parse_args()
 
     tar = build_tar()
     out = Path("_deploy.tar.gz")
     out.write_bytes(tar)
     print(f"wrote {out} ({len(tar)} bytes)")
+
+    # Also emit the base64 form that _deploy.py consumes, next to _deploy.py
+    # itself. These were two separate steps once, and a "successful" deploy
+    # then shipped a stale tarball for hours: pack.py reported the new byte
+    # count while _deploy.py read a _deploy.b64 that nobody had regenerated.
+    # Producing both in one step makes that failure mode impossible.
+    import base64
+    b64_path = Path(args.b64_out).expanduser()
+    b64_path.write_text(base64.b64encode(tar).decode())
+    print(f"wrote {b64_path} ({b64_path.stat().st_size} chars)")
     return 0
 
 

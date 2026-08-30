@@ -240,12 +240,24 @@ def main() -> int:
     if blend_file.exists():
         spec.data_blend = blend_file.read_text().split()
 
-    argv = build_argv(spec)
     nnodes = spec.topology.nnodes
     hs = hosts(nnodes)
     port = args.port or random.randint(29600, 29990)
     stamp = time.strftime("%m%d_%H%M%S")
     run_dir = RUN_ROOT / f"{spec.run_id}_{stamp}"
+
+    # TensorBoard event files live inside the run directory, so a run's
+    # scalars travel with its logs and argv.json. Megatron writes them from
+    # the last rank only; that rank's node holds the files.
+    #
+    # This must happen BEFORE build_argv: the run dir is only known here, and
+    # setting the field afterwards silently produced an argv with no
+    # --tensorboard-dir at all, so the flag looked configured but nothing was
+    # ever written.
+    if spec.tensorboard_dir is None:
+        spec.tensorboard_dir = f"{str(run_dir).replace(chr(92), '/')}/tensorboard"
+
+    argv = build_argv(spec)
 
     print(f"run       : {spec.run_id}")
     print(f"spec      : {args.spec}")

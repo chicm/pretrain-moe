@@ -173,3 +173,40 @@ def test_no_recompute_anywhere():
     from moe_rebuild.specs import REGISTRY
     for name, factory in REGISTRY.items():
         assert "--recompute-granularity" not in build_argv(factory()), name
+
+
+class TestTensorBoard:
+    """TensorBoard must be on, and must not drag in the timer barriers."""
+
+    def _argv(self, **kw):
+        from moe_rebuild.specs import rfull_moe_prod
+        from moe_rebuild.config import build_argv
+        spec = rfull_moe_prod()
+        for k, v in kw.items():
+            setattr(spec, k, v)
+        return build_argv(spec)
+
+    def test_tensorboard_dir_emitted_when_set(self):
+        a = self._argv(tensorboard_dir="/scratch/rfull/runs/x/tensorboard")
+        assert "--tensorboard-dir" in a
+        assert a[a.index("--tensorboard-dir") + 1].endswith("/tensorboard")
+
+    def test_absent_when_unset(self):
+        a = self._argv(tensorboard_dir=None)
+        assert "--tensorboard-dir" not in a
+
+    def test_never_logs_timers_to_tensorboard(self):
+        """--log-timers-to-tensorboard raises the timing log level, and those
+        timers call torch.distributed.barrier() + cuda.synchronize() on hot
+        paths, serialising all 120 ranks. Measured at 4 layers / 120 GPUs:
+        with timers on, not one iteration completed; with them off, it1=50.7s.
+        Instrumentation must not change what it measures."""
+        a = self._argv(tensorboard_dir="/tmp/tb")
+        assert "--log-timers-to-tensorboard" not in a
+        assert "--timing-log-level" in a
+        assert a[a.index("--timing-log-level") + 1] == "0"
+
+    def test_queue_size_flushes_promptly(self):
+        """A run that dies must still have its scalars on disk."""
+        a = self._argv(tensorboard_dir="/tmp/tb")
+        assert a[a.index("--tensorboard-queue-size") + 1] == "1"

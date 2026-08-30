@@ -132,6 +132,8 @@ class RunSpec:
     data_split: str = "999,1,0"
     save: str | None = None
     load: str | None = None
+    tensorboard_dir: str | None = None
+    distributed_timeout_minutes: int = 120
     extra_args: list[str] = field(default_factory=list)
 
     def to_json(self) -> str:
@@ -294,6 +296,20 @@ def build_argv(spec: RunSpec) -> list[str]:
     a += ["--eval-iters", str(s.eval_iters)]
     a += ["--log-interval", str(s.log_interval)]
     a += ["--log-throughput"]
+
+    # ---- TensorBoard -----------------------------------------------------
+    # Scalars only. Deliberately NOT passing --log-timers-to-tensorboard:
+    # that flag makes Megatron raise the effective timing log level, and the
+    # timers it then activates call torch.distributed.barrier() +
+    # torch.cuda.synchronize() on hot paths (see the --timing-log-level note
+    # below). Logging must never change what it measures.
+    if spec.tensorboard_dir:
+        a += ["--tensorboard-dir", spec.tensorboard_dir]
+        # queue_size=1 flushes every log step, so a run that dies still has
+        # its scalars on disk; the writer is rank-last only, so this is cheap.
+        a += ["--tensorboard-queue-size", "1"]
+        a += ["--log-validation-ppl-to-tensorboard"]
+        a += ["--log-memory-to-tensorboard"]
     # Keep timers OFF in production. Megatron's timers take `barrier=True`
     # in several hot paths (training.py:744/758/1650, and the ones
     # finalize_model_grads starts), and `Timer.start` then does
@@ -305,7 +321,14 @@ def build_argv(spec: RunSpec) -> list[str]:
     a += ["--timing-log-level", "0"]
     # 30 min is not enough: iteration 1 alone takes ~16 min of kernel
     # autotune on ROCm, and a slow checkpoint write can add more.
-    a += ["--distributed-timeout-minutes", "120"]
+    #
+    # This is a trade-off, not a free safety margin. A hung collective reports
+    # only after the timeout expires, so a 120-minute setting means every
+    # deadlock costs two hours before any rank says a word -- which is exactly
+    # what the 48-layer run did (single ALLTOALL_BASE, ran for 7 200 049 ms).
+    # Bisection runs therefore lower it; production keeps it high so that a
+    # genuinely slow iteration is never killed and mistaken for a hang.
+    a += ["--distributed-timeout-minutes", str(spec.distributed_timeout_minutes)]
 
     a += spec.extra_args
     return a

@@ -371,3 +371,48 @@ in RCCL (`ncclDevKernel_Generic` 23.7 %, `nccl:all_to_all` 22.0 %) against
 geometry. Next step is a `rocprofv3 --kernel-trace` on one rank across several
 iterations to see whether the slow iterations differ in kernel mix or purely in
 collective wait time.
+
+
+## The 120-GPU stall: what it is not (2026-08-30)
+
+Symptom: training produces iterations, then freezes for minutes at a time.
+Deeper models freeze longer. Not a crash -- it recovers.
+
+### The measurement that actually discriminates
+
+`rocm-smi --showuse` reports **100 % busy while RCCL spins waiting**, so it
+cannot tell "computing" from "waiting". Power draw can:
+
+| state | MI300X power | variance |
+|---|---|---|
+| idle | ~130-150 W | - |
+| real GEMM work | 400-700 W | large, sd > 40 W |
+| **RCCL spin-wait** | **250-270 W** | **flat, sd < 1 W** |
+
+During a stall, 20 samples gave `mean=268 W sd=0.2 W` at 100 % "use". That is
+the signature: the GPUs are burning power in a spin loop, not computing.
+
+### Ruled out, each by direct measurement
+
+| hypothesis | evidence against |
+|---|---|
+| node-5 is a bad node | bare 8-GPU variable-split alltoall: 300 iters in 10.6 s, same as node-0 |
+| the interconnect is unhealthy | bare 120-rank collectives: all_reduce(1) **0.3 ms**, reduce_scatter(480 MiB) **4.6 ms**, all_gather **2.8 ms**, barrier **0.33 ms** |
+| EP alltoall with data-dependent sizes | bare 120-rank EP probe (dispatch+combine, uneven splits, DP all_reduce every 8): **400 iters in 15.3 s**, 2 stalls, both at init |
+| the training env block (RCCL/HSA vars) | same probe **with** the full env block: 15.7 s vs 15.3 s. No effect |
+| grad-norm apex fallback | `amp_C` is genuinely missing, so Megatron uses `local_multi_tensor_l2_norm` -- but that costs **40.4 ms** for 1104 large tensors, and `torch._foreach_norm` is no faster (44 ms) |
+| a depth threshold | wrong: 4L stalls too (iteration 4 took 201 s). Depth changes duration, not presence |
+
+### Two process errors worth not repeating
+
+**The stack frame is a synchronisation point, not the cost.** Every rank sat in
+`clip_grads.py get_grad_norm_fp`, so I attributed the stall to grad-norm --
+then measured it at 40 ms. It is simply the first `.item()` after the backward,
+where all queued async work settles. A frame that is milliseconds in isolation
+but minutes in situ is a barrier, not a culprit; switch to GPU-side attribution
+instead of sampling more Python stacks.
+
+**A probe that reports nothing yet is not a probe that hung.** I declared the
+env-block arm "stuck -- 12 procs, zero output" and was about to conclude the
+env block caused the stall. It finished in 15.7 s; I had polled too early.
+Both arms passed. Poll until the process exits, then read the result.

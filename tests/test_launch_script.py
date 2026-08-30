@@ -82,3 +82,36 @@ def test_log_redirect_lets_ssh_detach():
     """The script must reopen its own fds or ssh never closes the channel."""
     s = _script(dense_1b(2))
     assert "exec > /tmp/run/node0.log 2>&1 < /dev/null" in s
+
+
+class TestTensorBoardReachesArgv:
+    """The launcher must put --tensorboard-dir into the argv it actually runs.
+
+    Regression: build_argv() was called before the launcher assigned
+    spec.tensorboard_dir (the run dir is only known later), so every launched
+    run had no --tensorboard-dir at all. config.py was correct and its unit
+    test passed -- the bug lived in the ordering between the two, which only
+    an end-to-end assertion on the emitted argv can catch.
+    """
+
+    def test_launcher_orders_assignment_before_build(self):
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "tools" / "launch.py").read_text(encoding="utf-8")
+        assign = src.index("spec.tensorboard_dir =")
+        build = src.index("argv = build_argv(spec)")
+        assert assign < build, (
+            "spec.tensorboard_dir must be set before build_argv(), "
+            "otherwise the flag never reaches the training process")
+
+    def test_emitted_argv_has_tensorboard_dir(self):
+        from moe_rebuild.specs import rfull_moe_prod
+        from moe_rebuild.config import build_argv
+
+        spec = rfull_moe_prod()
+        spec.tensorboard_dir = "/scratch/rfull/runs/r_0101_000000/tensorboard"
+        argv = build_argv(spec)
+        assert "--tensorboard-dir" in argv
+        got = argv[argv.index("--tensorboard-dir") + 1]
+        assert got.endswith("/tensorboard"), got
+        assert "\\" not in got, "run dir must use forward slashes on the cluster"

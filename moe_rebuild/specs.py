@@ -211,17 +211,26 @@ def moe_prod_smoke(nnodes: int = 15, train_iters: int = 30) -> RunSpec:
 
 
 
-def moe_bisect_15n(num_layers: int = 4, train_iters: int = 25) -> RunSpec:
+def moe_bisect_15n(num_layers: int = 4, train_iters: int = 25,
+                   timeout_min: int = 10) -> RunSpec:
     """Production topology at reduced depth, to isolate per-layer cost.
 
     Everything except `num_layers` matches `moe_prod_smoke`, so a comparison
     between depths changes exactly one variable.
+
+    `timeout_min` defaults to 10 rather than the production 120. A hung
+    collective costs exactly one timeout before it reports, so a long timeout
+    makes each failed probe cost hours: the 48-layer run sat in a single
+    ALLTOALL_BASE for the full 7 200 s before any rank said anything. Short
+    timeouts are for bisection; production keeps a long one so that a slow
+    iteration is never mistaken for a hang.
     """
     spec = moe_prod_smoke(nnodes=15, train_iters=train_iters)
     spec.run_id = f"bisect_{num_layers}L"
     spec.model.num_layers = num_layers
     spec.model.moe_layer_freq = f"[0]*2+[1]*{num_layers - 2}"
     spec.schedule.lr_warmup_iters = 2
+    spec.distributed_timeout_minutes = timeout_min
     return spec
 
 REGISTRY = {
@@ -234,4 +243,7 @@ REGISTRY = {
     "moe_prod_15n": rfull_moe_prod,
     "moe_bisect_4L": lambda: moe_bisect_15n(4, 25),
     "moe_bisect_12L": lambda: moe_bisect_15n(12, 25),
+    "moe_bisect_24L": lambda: moe_bisect_15n(24, 12),
+    "moe_bisect_36L": lambda: moe_bisect_15n(36, 12),
+    "moe_bisect_48L": lambda: moe_bisect_15n(48, 12),
 }
