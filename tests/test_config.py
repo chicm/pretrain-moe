@@ -43,7 +43,11 @@ def test_moe_mini_flags():
     assert val(a, "--moe-token-dispatcher-type") == "alltoall"
     assert val(a, "--moe-router-topk") == "6"
     assert val(a, "--moe-router-dtype") == "fp32"
-    assert "--moe-grouped-gemm" in a
+    # Grouped GEMM is OFF: it is the cause of the 48-layer stall. On 48L/1n
+    # with this flag as the only variable, on = iteration 1 never completed
+    # (all 8 ranks spinning in backward at ~250 W); off = 22/25 iterations,
+    # loss 12.338 -> 7.797, 82.5 TFLOP/s, zero iterations over 30 s.
+    assert "--moe-grouped-gemm" not in a
     # Dropless. Fixed capacity was tested as the single variable on the
     # 12-layer control and was worse: 233 s to iteration 1 without it,
     # no iteration in 9 min with it.

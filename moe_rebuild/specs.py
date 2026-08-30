@@ -215,6 +215,20 @@ def moe_prod_smoke(nnodes: int = 15, train_iters: int = 30) -> RunSpec:
 
 
 
+def _dispatcher(spec: RunSpec, kind: str) -> RunSpec:
+    """Swap the MoE token dispatcher (alltoall <-> allgather)."""
+    spec.run_id = spec.run_id + "_" + kind
+    spec.model.moe_token_dispatcher_type = kind
+    return spec
+
+
+def _no_grouped_gemm(spec: RunSpec) -> RunSpec:
+    """Turn off --moe-grouped-gemm, falling back to per-expert GEMMs."""
+    spec.run_id = spec.run_id + "_nogg"
+    spec.model.moe_grouped_gemm = False
+    return spec
+
+
 def _no_clip(spec: RunSpec) -> RunSpec:
     """Disable gradient clipping, and with it the DP-wide grad-norm reduction."""
     spec.run_id = spec.run_id + "_noclip"
@@ -316,6 +330,15 @@ REGISTRY = {
     "moe_bisect_24L_2n": lambda: moe_bisect_1n(24, 25, nnodes=2),
     "moe_bisect_48L_2n": lambda: moe_bisect_1n(48, 25, nnodes=2),
     "moe_bisect_12L_1n": lambda: moe_bisect_1n(12, 25),
+    # 48 layers on a SINGLE node. 12L/1n ran 25/25 at 5.5 s median. If 48L/1n
+    # is also pathological then inter-node networking is irrelevant and the
+    # cost is per-layer local work (grouped GEMM / EP alltoall within the node).
+    "moe_bisect_48L_1n": lambda: moe_bisect_1n(48, 25),
+    "moe_bisect_24L_1n": lambda: moe_bisect_1n(24, 25),
+    # Single-variable arms on 48L/1n (48L/1n stalls in backward with all 8
+    # ranks spinning at ~250 W, no network involved).
+    "moe_bisect_48L_1n_allgather": lambda: _dispatcher(moe_bisect_1n(48, 25), "allgather"),
+    "moe_bisect_48L_1n_nogg": lambda: _no_grouped_gemm(moe_bisect_1n(48, 25)),
     "moe_bisect_4L_1n": lambda: moe_bisect_1n(4, 25),
     "moe_bisect_4L": lambda: moe_bisect_15n(4, 25),
     "moe_bisect_12L": lambda: moe_bisect_15n(12, 25),

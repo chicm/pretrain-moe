@@ -723,3 +723,49 @@ yet explain the run -- something that does not appear at one layer is dominating
 at 48. Candidates in order: per-layer RCCL group count scaling with depth,
 `--moe-token-dispatcher-type allgather` as a single-variable swap, and the
 missing `amp_C` fused kernels.
+
+
+## ROOT CAUSE: `--moe-grouped-gemm`
+
+Single-variable test on 48L/1n -- same config, same node, same data cache, only
+this flag differs:
+
+| `--moe-grouped-gemm` | iteration 1 | after that | TFLOP/s | iterations > 30 s |
+|---|---|---|---|---|
+| **on** | never completed | 0 iterations, all 8 ranks spinning in `backward_step` at ~250 W | 2.4 | 100 % |
+| **off** | 52.3 s | **22/25, loss 12.338 -> 7.797** | **82.5** | **0/21** |
+
+A 34x throughput difference and the difference between running and not running.
+
+### Why every earlier hypothesis missed it
+
+The stall reproduces on **one node with no inter-node traffic**, which retired
+the entire networking line of enquiry in a single run. The reason it looked
+like a distributed problem for so long is that the failure only manifests at
+depth, and depth had never been varied independently -- the sole 48-layer
+config was also the sole 120-GPU config.
+
+The moving stack frames (`permute`, `custom_backward`, `get_grad_norm_fp32`)
+were all downstream: with one rank stuck inside a fused per-expert GEMM, the
+other 119 pile up at whichever collective comes next, and which one that is
+depends on when each rank arrived.
+
+These were tested and cleared along the way, each as a single variable:
+capacity factor (twice), DDP bucket size, overlap-grad-reduce, distributed
+optimizer, global batch size, gradient clipping, token dispatcher
+(`alltoall` -> `allgather`, still stalls), IB fabric, and GPU memory
+(65 GB of 192 GB used, zero allocator retries).
+
+### Production run
+
+`rfull_moe_prod_0830_101828`, 48 layers, 25.85B parameters, 120 GPUs:
+
+- **33 iterations in 8 minutes**, loss **12.3330 -> 12.1911**, decreasing
+  monotonically
+- median **9.9 s/iter**, max 16.3 s, **0 of 30 iterations over 30 s**
+- **76.5 TFLOP/s/GPU** median, peak 79.6
+- TensorBoard growing (80,938 bytes)
+- ETA for the full 203,451-step schedule: **~23 days**
+
+The grouped path stays switchable (`moe_grouped_gemm`) so it can be retested on
+a future ROCm build.

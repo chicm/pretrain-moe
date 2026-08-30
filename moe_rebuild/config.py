@@ -80,6 +80,32 @@ class Model:
     # than the real token count).
     moe_expert_capacity_factor: float | None = None
 
+    # Token dispatcher: "alltoall" (default) or "allgather".
+    #
+    # Every 48-layer stall lands in the MoE backward with all ranks spinning at
+    # ~250 W, and it reproduces on a SINGLE node, so the blocking op is the EP
+    # dispatch collective itself rather than anything inter-node. "allgather"
+    # replaces that exact path, which makes it the one-variable test.
+    moe_token_dispatcher_type: str = "alltoall"
+
+    # --moe-grouped-gemm is OFF because it is the cause of the 48-layer stall.
+    #
+    # Single-variable test on 48L/1n (same config, same node, only this flag):
+    #
+    #     on : iteration 1 never completed, all 8 ranks spinning in
+    #          backward_step at ~250 W, 2.4 TFLOP/s on the one 48L/2n
+    #          iteration that did finish
+    #     off: 22/25 iterations, loss 12.338 -> 7.797, median 9.2 s,
+    #          max 20.5 s, ZERO iterations over 30 s, 82.5 TFLOP/s
+    #
+    # That is a 34x throughput difference and the difference between running
+    # and not running, so it is not measurement noise. The grouped path on this
+    # ROCm build appears to deadlock inside the fused per-expert GEMM; the
+    # unfused fallback is both correct and fast.
+    #
+    # Kept switchable so the grouped path can be retested on a future ROCm.
+    moe_grouped_gemm: bool = False
+
     @property
     def is_moe(self) -> bool:
         return self.num_experts is not None
@@ -216,8 +242,9 @@ def build_argv(spec: RunSpec) -> list[str]:
         a += ["--moe-router-load-balancing-type", "aux_loss"]
         a += ["--moe-aux-loss-coeff", str(m.moe_aux_loss_coeff)]
         a += ["--moe-z-loss-coeff", str(m.moe_z_loss_coeff)]
-        a += ["--moe-token-dispatcher-type", "alltoall"]
-        a += ["--moe-grouped-gemm"]
+        a += ["--moe-token-dispatcher-type", m.moe_token_dispatcher_type]
+        if m.moe_grouped_gemm:
+            a += ["--moe-grouped-gemm"]
         # Fixed expert capacity, with every expert's input padded up to it.
         #
         # Dropless routing gives each expert a different token count on every
