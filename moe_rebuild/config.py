@@ -68,12 +68,16 @@ class Model:
     moe_router_topk: int = 6
     moe_aux_loss_coeff: float = 1e-3
     moe_z_loss_coeff: float = 1e-4
-    # None = dropless. Setting a capacity factor was tried as a fix for the
-    # 120-GPU stall (theory: constant grouped-GEMM shapes avoid per-shape
-    # hipBLASLt heuristic selection). It did not help at 36 layers, and a
-    # controlled 12-layer rerun showed it made things *worse*: the same
-    # config that reached iteration 1 in 252 s did not reach it in 10 min.
-    # Left at None until there is evidence for a change.
+    # Dropless. A fixed capacity factor was tested twice against the stall and
+    # refuted both times:
+    #   - confounded with --ddp-bucket-size/--overlap-grad-reduce: no help
+    #   - alone, as the single variable, on the 12-layer control:
+    #     dropless reached iteration 1 in 233 s; capacity 1.25 produced
+    #     no iteration at all in 9 minutes.
+    # The "constant GEMM shape avoids ROCm kernel re-selection" theory is
+    # therefore wrong, or is outweighed by the cost of padding every expert
+    # to capacity (top-6 of 96 experts makes the padded tensor much larger
+    # than the real token count).
     moe_expert_capacity_factor: float | None = None
 
     @property

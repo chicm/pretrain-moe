@@ -157,7 +157,11 @@ def rfull_moe_prod(
     load: str | None = None,
 ) -> RunSpec:
     topo = Topology(nnodes=nnodes, expert_parallel=8)
-    assert topo.world == 120, f"production expects 120 GPUs, got {topo.world}"
+    # Production is 120 GPUs. Smaller worlds are allowed only for the
+    # single-node bisect arms, which exist to vary DP width while holding the
+    # EP group identical; anything in between is almost certainly a mistake.
+    assert topo.world == 120 or nnodes == 1, (
+        f"production expects 120 GPUs (or nnodes=1 for bisect), got {topo.world}")
     return RunSpec(
         run_id=run_id,
         model=_rfull_model("rfull"),
@@ -211,6 +215,25 @@ def moe_prod_smoke(nnodes: int = 15, train_iters: int = 30) -> RunSpec:
 
 
 
+def moe_bisect_1n(num_layers: int = 12, train_iters: int = 25,
+                  timeout_min: int = 10) -> RunSpec:
+    """Same model and EP group as the 15-node bisect, on a single node.
+
+    EP=8 is intra-node either way (order tp-cp-ep-dp-pp with TP=CP=1), so the
+    expert-parallel collectives are identical; only DP width changes, 120 -> 8.
+    """
+    spec = moe_prod_smoke(nnodes=1, train_iters=train_iters)
+    spec.run_id = f"bisect_{num_layers}L_1n"
+    # DP=8 here instead of 120, so keep 8 grad-accum steps per rank as in
+    # production (gbs = dp * mbs * accum = 8 * 1 * 8).
+    spec.schedule.global_batch_size = 64
+    spec.model.num_layers = num_layers
+    spec.model.moe_layer_freq = f"[0]*2+[1]*{num_layers - 2}"
+    spec.schedule.lr_warmup_iters = 2
+    spec.distributed_timeout_minutes = timeout_min
+    return spec
+
+
 def moe_bisect_15n(num_layers: int = 4, train_iters: int = 25,
                    timeout_min: int = 10) -> RunSpec:
     """Production topology at reduced depth, to isolate per-layer cost.
@@ -241,6 +264,12 @@ REGISTRY = {
     "moe_full_1n": moe_1node_full,
     "moe_smoke_15n": moe_prod_smoke,
     "moe_prod_15n": rfull_moe_prod,
+    # Single-node variants. EP=8 fits inside one node, so these keep the
+    # expert-parallel dimension identical to production and change only the
+    # data-parallel width (DP=8 instead of DP=120). That isolates "is the
+    # stall in the EP alltoall?" from "is it in the 120-rank DP dimension?".
+    "moe_bisect_12L_1n": lambda: moe_bisect_1n(12, 25),
+    "moe_bisect_4L_1n": lambda: moe_bisect_1n(4, 25),
     "moe_bisect_4L": lambda: moe_bisect_15n(4, 25),
     "moe_bisect_12L": lambda: moe_bisect_15n(12, 25),
     "moe_bisect_24L": lambda: moe_bisect_15n(24, 12),

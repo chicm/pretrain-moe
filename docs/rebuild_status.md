@@ -464,3 +464,46 @@ PATH; find it in the ROCm install or use `torch.profiler` with
 first stall. The question to answer is which collective is outstanding when
 occupancy hits zero -- the Python frame has pointed at three different
 synchronisation points so far, and none of them was the cost.
+
+
+## The stall is in the DP dimension, not the model (2026-08-30)
+
+The experiment that finally isolated it: **the same 12-layer model, the same
+EP=8 group, changing only data-parallel width.**
+
+EP=8 is intra-node under the `tp-cp-ep-dp-pp` order with TP=CP=1, so the
+expert-parallel collectives are byte-identical between the two arms. The only
+difference is DP=8 versus DP=120.
+
+| arm | result |
+|---|---|
+| **1 node, DP=8** | **25/25 iterations, loss 12.346 -> 7.743, median 5.5 s/iter** |
+| 15 nodes, DP=120 | iteration 1 (107 s), then nothing for 7+ minutes |
+
+So:
+
+- The MoE model, router, dispatcher, grouped GEMM, expert parallelism and the
+  whole training loop are **correct** -- they converge cleanly.
+- The failure is specific to the 120-rank data-parallel dimension.
+- It is not the interconnect per se: bare 120-rank collectives are healthy
+  (reduce_scatter 4.6 ms, all_gather 2.8 ms, barrier 0.33 ms) and a bare
+  120-rank EP alltoall probe ran 400 iterations in 15 s.
+
+That combination -- healthy collectives in isolation, healthy model at DP=8,
+stall only when both are combined -- points at the interaction between the
+distributed optimizer's DP-wide operations and the MoE parameter structure,
+rather than at any single component.
+
+Single-node throughput is also a useful reference point that did not exist
+before: **median 5.5 s/iter at 12 layers**, with one 47.7 s outlier in 24
+iterations, so the intermittent stall exists at DP=8 too -- just rarely enough
+to make progress. Depth and DP width both increase its frequency.
+
+### Also fixed here
+
+- TensorBoard is confirmed working end to end: 73 KB of events written by the
+  last rank, no `--log-timers-to-tensorboard` (which would re-enable the
+  barrier-inserting timers).
+- `pack.py` now writes both `_deploy.tar.gz` and the `_deploy.b64` that
+  `_deploy.py` consumes, and `_deploy.py` refuses a b64 older than its sources.
+  Before this, deploys silently shipped hours-old code while reporting success.
