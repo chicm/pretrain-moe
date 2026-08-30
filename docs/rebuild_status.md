@@ -769,3 +769,45 @@ optimizer, global batch size, gradient clipping, token dispatcher
 
 The grouped path stays switchable (`moe_grouped_gemm`) so it can be retested on
 a future ROCm build.
+
+
+## Production running
+
+`rfull_moe_prod_0830_103353` -- 48 layers, 25.85B parameters, 120 GPUs
+(15 nodes x 8 MI300X), grouped GEMM off.
+
+| metric | value |
+|---|---|
+| iterations | 33 and climbing |
+| loss | **12.3330 -> 12.1936**, monotone (first-half mean 12.3258, second-half 12.2566) |
+| step time | median **9.9 s**, max 11.1 s, **0 of 30 over 30 s** |
+| throughput | **76.7 TFLOP/s/GPU** median |
+| TensorBoard | serving HTTP 200 on node-14:6006, events file growing |
+| ETA | **~23 days** for the full 203,451-step schedule |
+
+Compare with the previous production attempt on the same hardware and config,
+differing only in `--moe-grouped-gemm`: 0 iterations in 2 h 20 min.
+
+### Self-inflicted kill, worth recording
+
+An earlier launch of this same fixed config ran 37 clean iterations at
+75.5 TFLOP/s and then died -- because I ran `pkill -f '[t]ensorboard'` to
+restart the TensorBoard *server*. The trainer's argv contains
+`--tensorboard-dir /scratch/.../tensorboard`, so `-f` matched all 120 ranks and
+SIGTERMed them.
+
+This is the third variant of the same footgun (after a stop script matching
+itself, and SIGUSR1 hitting the torchrun agent). The rule: **kill by absolute
+executable path, and always `pgrep -af <pattern>` first to see what a pattern
+would match.** Flags like `--tensorboard-dir`, `--save`, `--load` and
+`--data-path` drag directory names into argv, so tool names make dangerous
+patterns.
+
+`pkill -f '/opt/venv/bin/tensorboard'` is safe and was verified: TensorBoard
+restarted while `trainers still up: 41`.
+
+### TensorBoard events live on the last rank's node
+
+Megatron writes them from node-14, not node-0, and `/scratch` is node-local, so
+the server has to run on node-14. `ls -la <run>/tensorboard/` across nodes
+finds the owner.
