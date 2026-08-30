@@ -310,6 +310,11 @@ REGISTRY = {
     # grad-norm frame was only the rendezvous; if it does not, the norm
     # reduction is implicated.
     "moe_bisect_12L_2n_noclip": lambda: _no_clip(moe_bisect_1n(12, 25, nnodes=2)),
+    # Depth scan at fixed DP=16 on the 2-node reproducer. 12L is known good
+    # (22/25, converged). Production is 48L/DP=120 and hard-deadlocks, but that
+    # changed depth AND width at once. These arms move depth alone.
+    "moe_bisect_24L_2n": lambda: moe_bisect_1n(24, 25, nnodes=2),
+    "moe_bisect_48L_2n": lambda: moe_bisect_1n(48, 25, nnodes=2),
     "moe_bisect_12L_1n": lambda: moe_bisect_1n(12, 25),
     "moe_bisect_4L_1n": lambda: moe_bisect_1n(4, 25),
     "moe_bisect_4L": lambda: moe_bisect_15n(4, 25),

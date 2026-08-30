@@ -670,3 +670,56 @@ The next experiment must change depth alone at fixed DP=16 on the cheap 2-node
 reproducer: 12L (known good) -> 24L -> 48L. If 48L/DP=16 deadlocks, the
 reproducer costs 2 nodes instead of 15 and the DP-width dimension drops out of
 the problem entirely.
+
+
+## Depth isolated: 48L reproduces on 2 nodes
+
+Ran `moe_bisect_48L_2n` -- 48 layers at DP=16, the same width where 12 layers
+ran 22/25 and converged. Depth is the only variable.
+
+**It reproduces the production failure exactly.**
+
+| arm | layers | DP | iteration 1 | after that |
+|---|---|---|---|---|
+| `bisect_12L_2n_noclip` | 12 | 16 | ~6 s | 22/25, loss 12.345 -> 7.900 |
+| `bisect_48L_2n` | 48 | 16 | **310.3 s @ 2.4 TFLOP/s** | iteration 2 unfinished after **12 min** |
+| `rfull_moe_prod` | 48 | 120 | never | 0 iterations in 2h20m |
+
+So the 120-GPU deadlock is **not about DP width at all**. Everything I attributed
+to scale -- the DP=8/16/120 gradient, "the stall grows with DP width" -- was
+depth doing the work, since the only 48-layer arm I had ever run was also the
+only 120-wide one. Width and depth had been confounded in every production
+attempt.
+
+### The 2.4 TFLOP/s number is the real finding
+
+Dense 1B sustains 206 TFLOP/s/GPU on this cluster. This MoE run does **2.4**,
+roughly 1 % of that, on an iteration that did complete correctly. That is not a
+hang -- it is arithmetic running at a pathological rate, and the "deadlock" is
+just that rate applied to a 120-wide gradient reduction.
+
+Supporting evidence at the moment of the stall:
+
+- Power **246-268 W** on both nodes, sd < 8 W -- RCCL spin-wait.
+- node-0 in `custom_backward`, node-1 in `token_permutation` **at the same
+  instant** -- the ranks are in different phases, i.e. genuinely diverged rather
+  than symmetrically waiting on one collective. That is the straggler shape,
+  and it explains why the stall frame kept moving between sync points.
+
+### Cost of the correction
+
+The 2-node arm reproduces in **9 minutes** what the 15-node production run took
+**140 minutes** to show, at 1/7 the hardware. This should have been the first
+experiment after 12L passed; instead depth was only ever changed together with
+width, which is the same one-variable discipline failure as the earlier
+capacity-factor/DDP-flags episode.
+
+### Next
+
+Profile the 48L forward/backward directly on 2 nodes and find what costs 100x.
+The earlier single-layer profile (RCCL 45 %, `_GroupedLinearBackward` 23 %,
+21.5 ms/layer) predicts ~1 s for 48 layers, not 310 s, so the profile does not
+yet explain the run -- something that does not appear at one layer is dominating
+at 48. Candidates in order: per-layer RCCL group count scaling with depth,
+`--moe-token-dispatcher-type allgather` as a single-variable swap, and the
+missing `amp_C` fused kernels.
