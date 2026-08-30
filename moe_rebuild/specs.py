@@ -150,6 +150,18 @@ PROD_STAGE_A_ITERS = 203_451
 PROD_GBS = 960
 PROD_MBS = 1
 
+# Checkpoint directory for production. Deliberately NOT "rfull_moe_prod": that
+# path is poisoned. Two failed torch_dist saves left an empty iter_0002000 and
+# a latest_checkpointed_iteration.txt there, and blobfuse caches per node --
+# deleting the file from all 15 nodes still left ranks reading it, eventually
+# as corrupt bytes:
+#
+#   FileNotFoundError: .../rfull_moe_prod/iter_4474717655932076052
+#
+# Nothing of value was lost (both attempts wrote zero bytes). Bump the suffix
+# rather than fight blobfuse cache coherence.
+PROD_CKPT_DIR = "rfull_moe_prod_v2"
+
 
 def rfull_moe_prod(
     nnodes: int = 15,
@@ -157,6 +169,7 @@ def rfull_moe_prod(
     run_id: str = "rfull_moe_prod",
     save: str | None = None,
     load: str | None = None,
+    ckpt_dir: str = PROD_CKPT_DIR,
 ) -> RunSpec:
     topo = Topology(nnodes=nnodes, expert_parallel=8)
     # Production is 120 GPUs. Smaller worlds are allowed only for the
@@ -197,8 +210,8 @@ def rfull_moe_prod(
             eval_iters=10,
             log_interval=1,
         ),
-        save=save or f"{CKPT_ROOT}/{run_id}",
-        load=load or f"{CKPT_ROOT}/{run_id}",
+        save=save or f"{CKPT_ROOT}/{ckpt_dir}",
+        load=load or f"{CKPT_ROOT}/{ckpt_dir}",
     )
 
 
