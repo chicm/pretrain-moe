@@ -607,3 +607,66 @@ scale threshold.
   not touch the 100 Gb/s `mlx5_an0`.
 - Bare 120-rank collectives: reduce_scatter 4.6 ms, all_gather 2.8 ms,
   barrier 0.33 ms.
+
+
+## Production 48L attempt: genuine deadlock, and a corrected verdict
+
+Launched `moe_prod_15n` on 15/15 nodes at 06:16. Model built correctly
+(4,585,502,720 params/rank, 25.86B total), reached `training ...`, TensorBoard
+opened. Then **0 iterations for 2h20m**, killed at 08:33.
+
+This was a real deadlock, and it means the optimistic reading in the previous
+section was wrong for 48 layers.
+
+### Evidence (both liveness criteria met)
+
+| probe | result |
+|---|---|
+| iterations | 0 for 129 min |
+| TensorBoard | frozen at 48,633 bytes since 06:17 |
+| `/proc/<pid>/io` over 45 s | node-0 **+178 KB**, node-7 **+0 bytes** |
+| CPU jiffies over 20 s | utime 1024 -> 1025, stime 577 -> 578 (static) |
+| GPU power | **245-260 W, sd < 8 W** = RCCL spin-wait, not compute |
+| stack, nodes 0/7/14 | all in `schedules.py:151 custom_backward` |
+| log sizes, 12 of 15 nodes | identical to the byte (15,338) |
+
+Progress has stopped *and* ranks are misaligned (node-0 still trickling io,
+node-7 completely still), which is the deadlock definition, unlike the 2-node
+case where every stall recovered.
+
+### The 120-minute watchdog never fired
+
+`distributed_timeout_minutes = 120`, yet at T+129 min **all 15 nodes reported
+zero watchdog lines**. The hang is therefore somewhere the RCCL watchdog does
+not police -- consistent with the backward pass blocking inside a kernel or an
+autograd wait rather than inside a monitored collective. Worth noting that a
+timeout which does not fire is itself a bug: it turns a crash into an
+indefinite occupancy of 120 GPUs.
+
+`node-0`'s extra 36 KB was only rank-0's argument dump, and node-7/14's extra
+bytes were my own SIGUSR1 traces. No genuine outlier node -- everything is
+stuck together.
+
+### What this changes
+
+The scan now reads:
+
+| layers | DP width | result |
+|---|---|---|
+| 12 | 8 | 25/25, converges |
+| 12 | 16 | 22/25, converges, ~10 % of iterations stall but recover |
+| 12 | 120 | 1 iteration, then stall |
+| **48** | **120** | **0 iterations, hard deadlock** |
+
+So **depth is a second independent factor**, not just DP width. The earlier
+"stalls always recover" conclusion holds for 12 layers and does not generalise
+to 48. I should not have launched production on the strength of a 12-layer
+result -- the honest reading of the 15-node 12L arm (1 iteration then stall)
+was already a warning that 120-wide is qualitatively different.
+
+### Next
+
+The next experiment must change depth alone at fixed DP=16 on the cheap 2-node
+reproducer: 12L (known good) -> 24L -> 48L. If 48L/DP=16 deadlocks, the
+reproducer costs 2 nodes instead of 15 and the DP-width dimension drops out of
+the problem entirely.
