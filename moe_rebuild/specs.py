@@ -215,6 +215,13 @@ def moe_prod_smoke(nnodes: int = 15, train_iters: int = 30) -> RunSpec:
 
 
 
+def _no_clip(spec: RunSpec) -> RunSpec:
+    """Disable gradient clipping, and with it the DP-wide grad-norm reduction."""
+    spec.run_id = spec.run_id + "_noclip"
+    spec.schedule.clip_grad = 0.0
+    return spec
+
+
 def _small_gbs(spec: RunSpec) -> RunSpec:
     """Global batch 120 (one microbatch per rank, no gradient accumulation).
 
@@ -297,6 +304,12 @@ REGISTRY = {
     # "more than one node" (inter-node fabric in the training path), not the
     # 120-rank scale. If it runs, the trigger scales with DP width.
     "moe_bisect_12L_2n": lambda: moe_bisect_1n(12, 25, nnodes=2),
+    # 2 nodes with gradient clipping off. clip_grad > 0 is the only caller of
+    # get_grad_norm_fp32 (optimizer.py:483), so this removes the DP-wide norm
+    # all-reduce that every stall has been sitting in. If it still stalls, the
+    # grad-norm frame was only the rendezvous; if it does not, the norm
+    # reduction is implicated.
+    "moe_bisect_12L_2n_noclip": lambda: _no_clip(moe_bisect_1n(12, 25, nnodes=2)),
     "moe_bisect_12L_1n": lambda: moe_bisect_1n(12, 25),
     "moe_bisect_4L_1n": lambda: moe_bisect_1n(4, 25),
     "moe_bisect_4L": lambda: moe_bisect_15n(4, 25),

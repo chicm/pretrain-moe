@@ -562,3 +562,48 @@ the stall.
 There is now a **2-node reproducer** that stalls within ~15 iterations and
 costs 3 minutes per attempt, instead of a 15-node one costing 15 minutes. Any
 further work on this should use it.
+
+
+## Grad-norm ruled out, and the stall's real character
+
+`clip_grad > 0` is the only caller of `get_grad_norm_fp32`
+(`optimizer.py:483`), so setting `--clip-grad 0.0` removes the DP-wide norm
+all-reduce entirely. On the 2-node reproducer:
+
+| iteration | 7 | 8 | 9 | **10** | 11 | 12 | **13** | 14 |
+|---|---|---|---|---|---|---|---|---|
+| seconds | 5.9 | 10.6 | 9.3 | **40.4** | 6.7 | 3.9 | **72.4** | 6.8 |
+
+The stalls survive with clipping off. Grad-norm was never the cost -- it was
+just where ranks happened to meet. That is now three synchronisation points
+this stall has hidden behind (`token_permutation`, `custom_backward`,
+`get_grad_norm_fp32`), which is exactly what a straggler looks like from the
+Python level.
+
+### The important property: stalls always recover
+
+22 of 25 iterations, loss **12.345 -> 7.900**, median **7.8 s**, P90 25 s,
+worst 72.4 s, and **10 % of iterations exceed 30 s**. Nothing hangs
+permanently. Everything that looked like a deadlock earlier was this same
+intermittent stall, observed for too short a window -- at 48 layers the first
+iteration is long enough that a 10-minute poll never saw the far side of it.
+
+So the correct characterisation is: **training is functional and converges;
+roughly one iteration in ten pays a large latency penalty.** That is a
+throughput problem, not a correctness or liveness one, and it should not block
+production -- it should be budgeted for and investigated separately.
+
+Also worth noting from the DP=8 arm: it showed one 47.7 s outlier in 24
+iterations (~4 %). The stall frequency grows with DP width but is present at
+every scale, which again argues for a straggler/jitter mechanism rather than a
+scale threshold.
+
+### Networking definitively cleared
+
+- 8 IB HCAs per node, all `mlx5_ib0..7`, all **400 Gb/s NDR**, all ACTIVE.
+- `packet_seq_err`, `local_ack_timeout_err`, `implied_nak_seq_err` all **0**,
+  and not growing.
+- RCCL uses all 8 evenly (12 references each in a 2-node NET trace), and does
+  not touch the 100 Gb/s `mlx5_an0`.
+- Bare 120-rank collectives: reduce_scatter 4.6 ms, all_gather 2.8 ms,
+  barrier 0.33 ms.
