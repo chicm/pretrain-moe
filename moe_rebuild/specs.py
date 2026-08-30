@@ -160,7 +160,7 @@ def rfull_moe_prod(
     # Production is 120 GPUs. Smaller worlds are allowed only for the
     # single-node bisect arms, which exist to vary DP width while holding the
     # EP group identical; anything in between is almost certainly a mistake.
-    assert topo.world == 120 or nnodes == 1, (
+    assert topo.world == 120 or nnodes <= 2, (
         f"production expects 120 GPUs (or nnodes=1 for bisect), got {topo.world}")
     return RunSpec(
         run_id=run_id,
@@ -215,18 +215,35 @@ def moe_prod_smoke(nnodes: int = 15, train_iters: int = 30) -> RunSpec:
 
 
 
+def _small_gbs(spec: RunSpec) -> RunSpec:
+    """Global batch 120 (one microbatch per rank, no gradient accumulation).
+
+    Must be a multiple of the DP width; 120 ranks x mbs 1 x 1 accum = 120.
+    """
+    spec.run_id = spec.run_id + "_smallgbs"
+    spec.schedule.global_batch_size = 120
+    return spec
+
+
+def _no_dist_opt(spec: RunSpec) -> RunSpec:
+    """Turn off ZeRO-1 sharding, keeping everything else identical."""
+    spec.run_id = spec.run_id + "_nodistopt"
+    spec.use_distributed_optimizer = False
+    return spec
+
+
 def moe_bisect_1n(num_layers: int = 12, train_iters: int = 25,
-                  timeout_min: int = 10) -> RunSpec:
+                  timeout_min: int = 10, nnodes: int = 1) -> RunSpec:
     """Same model and EP group as the 15-node bisect, on a single node.
 
     EP=8 is intra-node either way (order tp-cp-ep-dp-pp with TP=CP=1), so the
     expert-parallel collectives are identical; only DP width changes, 120 -> 8.
     """
-    spec = moe_prod_smoke(nnodes=1, train_iters=train_iters)
-    spec.run_id = f"bisect_{num_layers}L_1n"
-    # DP=8 here instead of 120, so keep 8 grad-accum steps per rank as in
-    # production (gbs = dp * mbs * accum = 8 * 1 * 8).
-    spec.schedule.global_batch_size = 64
+    spec = moe_prod_smoke(nnodes=nnodes, train_iters=train_iters)
+    spec.run_id = f"bisect_{num_layers}L_{nnodes}n"
+    # Keep 8 grad-accum steps per rank as in production:
+    # gbs = dp * mbs * accum = (8 * nnodes) * 1 * 8.
+    spec.schedule.global_batch_size = 64 * nnodes
     spec.model.num_layers = num_layers
     spec.model.moe_layer_freq = f"[0]*2+[1]*{num_layers - 2}"
     spec.schedule.lr_warmup_iters = 2
@@ -268,6 +285,18 @@ REGISTRY = {
     # expert-parallel dimension identical to production and change only the
     # data-parallel width (DP=8 instead of DP=120). That isolates "is the
     # stall in the EP alltoall?" from "is it in the 120-rank DP dimension?".
+    # 15 nodes, 12 layers, distributed optimizer OFF. Single variable against
+    # moe_bisect_12L, to test whether the DP-wide optimizer step is the stall.
+    "moe_bisect_12L_nodistopt": lambda: _no_dist_opt(moe_bisect_15n(12, 25)),
+    # 15 nodes but the SMALL global batch of the 1-node arm. The 1-node
+    # experiment changed two things at once -- DP width (120 -> 8) AND global
+    # batch (960 -> 64, since gbs must divide by DP width). This arm holds DP
+    # at 120 and moves only the batch, separating them.
+    "moe_bisect_12L_smallgbs": lambda: _small_gbs(moe_bisect_15n(12, 25)),
+    # 2 nodes: the smallest multi-node case. If this stalls, the trigger is
+    # "more than one node" (inter-node fabric in the training path), not the
+    # 120-rank scale. If it runs, the trigger scales with DP width.
+    "moe_bisect_12L_2n": lambda: moe_bisect_1n(12, 25, nnodes=2),
     "moe_bisect_12L_1n": lambda: moe_bisect_1n(12, 25),
     "moe_bisect_4L_1n": lambda: moe_bisect_1n(4, 25),
     "moe_bisect_4L": lambda: moe_bisect_15n(4, 25),

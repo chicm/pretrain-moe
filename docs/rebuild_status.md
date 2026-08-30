@@ -507,3 +507,58 @@ to make progress. Depth and DP width both increase its frequency.
 - `pack.py` now writes both `_deploy.tar.gz` and the `_deploy.b64` that
   `_deploy.py` consumes, and `_deploy.py` refuses a b64 older than its sources.
   Before this, deploys silently shipped hours-old code while reporting success.
+
+
+## DP-width scan: the stall is a continuum, not a 120-rank cliff
+
+Same 12-layer model, same EP=8 group, 8 grad-accum steps per rank in every arm.
+Only the data-parallel width changes.
+
+| DP width | nodes | result |
+|---|---|---|
+| 8 | 1 | **25/25 iterations**, loss 12.346 -> 7.743, median 5.5 s/iter (one 47.7 s outlier) |
+| 16 | 2 | **14 iterations**, loss 12.345 -> 8.044, 3.5-8.6 s/iter, then stalled at iteration 15 for 6+ min |
+| 120 | 15 | iteration 1 (107 s), then nothing |
+
+So the stall exists at every width; what changes is how many iterations run
+before it hits. That rules out a threshold effect and, with it, the whole class
+of "something breaks above N ranks" explanations.
+
+Two more single-variable arms, both refuted:
+
+| variable | result |
+|---|---|
+| `--use-distributed-optimizer` off (15 nodes) | still 0 iterations at T+9 min |
+| global batch 960 -> 120, no grad accumulation (15 nodes) | still 0 iterations at T+11 min |
+
+The second matters because the 1-node arm had necessarily changed *two* things
+(DP width and global batch, since gbs must divide by DP width). Holding DP at
+120 and moving only the batch showed the batch was not the variable.
+
+### Where it stalls, and why that frame is a red herring
+
+At DP=16 both nodes sit in `clip_grads.py:103 get_grad_norm_fp32`, inside
+`multi_tensor_applier(l2_norm_impl, ...)`. Benchmarked on the real MoE tensor
+mix (many small per-expert grads, not the uniform large tensors I used the
+first time):
+
+| shape mix | apex fallback | `torch._foreach_norm` |
+|---|---|---|
+| 12 layers, 270 tensors | 28.2 ms | 14.5 ms |
+| 48 layers, 1242 tensors | 35.3 ms | 3.3 ms |
+
+35 ms cannot produce a 6-minute stall. `get_grad_norm_fp32` ends in a DP-wide
+`all_reduce` of the norm, so it is simply the first place a rank must wait for
+every other rank. It is the *rendezvous*, not the cost -- the third distinct
+synchronisation point this stall has hidden behind (`token_permutation`,
+`custom_backward`, now grad-norm).
+
+The `amp_C` module genuinely is missing, so Megatron uses its Python fallback.
+That is worth fixing for throughput (14.5 -> 3.3 ms at 48 layers) but it is not
+the stall.
+
+### The useful outcome
+
+There is now a **2-node reproducer** that stalls within ~15 iterations and
+costs 3 minutes per attempt, instead of a 15-node one costing 15 minutes. Any
+further work on this should use it.

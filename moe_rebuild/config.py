@@ -145,6 +145,11 @@ class RunSpec:
     load: str | None = None
     tensorboard_dir: str | None = None
     distributed_timeout_minutes: int = 120
+    # ZeRO-1: shards optimizer state across the DP group, so the step becomes
+    # a reduce-scatter + per-shard update + all-gather over all DP ranks.
+    # Kept on for production (it is what makes 4.59 B params/rank fit), but
+    # switchable so the DP-dimension stall can be tested with it off.
+    use_distributed_optimizer: bool = True
     # 200 Mi elements ~= 400 MiB per bf16 bucket.
     ddp_bucket_size: int = 200_000_000
     extra_args: list[str] = field(default_factory=list)
@@ -260,7 +265,8 @@ def build_argv(spec: RunSpec) -> list[str]:
     # ---- precision -------------------------------------------------------
     a += ["--bf16"]
     a += ["--accumulate-allreduce-grads-in-fp32"]
-    a += ["--use-distributed-optimizer"]
+    if spec.use_distributed_optimizer:
+        a += ["--use-distributed-optimizer"]
     # NOT setting --ddp-bucket-size / --overlap-grad-reduce.
     #
     # Both were added on the theory that one ~8.5 GiB unbucketed reduce-scatter
